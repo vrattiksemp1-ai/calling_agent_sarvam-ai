@@ -1,0 +1,149 @@
+"""FastAPI application entry point for the Sarvam Cloud Lead Agent."""
+
+import logging
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from backend.api.call_routes import router as call_router
+from backend.api.routes import router
+from backend.config import Settings, get_settings
+from backend.conversation import ConversationEngine
+from backend.database import create_engine_and_session, make_database_url
+from backend.errors import AppError
+from backend.providers.llm_client import LlmClient
+from backend.providers.sarvam_client import SarvamClient
+from backend.rate_limit import RateLimiter
+from backend.telephony.call_manager import CallRegistry
+from backend.telephony.twilio_client import TwilioClient
+from backend.utils.logging import setup_logging
+
+logger = logging.getLogger(__name__)
+
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+
+
+def build_app(
+    settings: Settings | None = None,
+    *,
+    session_factory=None,
+    sarvam_client: SarvamClient | None = None,
+    llm_client: LlmClient | None = None,
+    twilio_client: TwilioClient | None = None,
+    call_registry: CallRegistry | None = None,
+) -> FastAPI:
+    settings = settings or get_settings()
+    setup_logging(settings.debug)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        for client_name in ("sarvam_client", "llm_client", "twilio_client"):
+            client = getattr(app.state, client_name, None)
+            if client is not None and hasattr(client, "aclose"):
+                await client.aclose()
+
+    app = FastAPI(
+        title=settings.app_name,
+        version="1.0.0",
+        lifespan=lifespan,
+        docs_url="/api/docs" if settings.debug else None,
+        redoc_url=None,
+        openapi_url="/api/openapi.json" if settings.debug else None,
+    )
+
+    if settings.cors_enabled and settings.cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origins,
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+            allow_headers=["*"],
+        )
+
+    _, factory = create_engine_and_session(make_database_url(settings))
+    app.state.settings = settings
+    app.state.session_factory = session_factory or factory
+    app.state.sarvam_client = sarvam_client or SarvamClient(settings)
+    app.state.llm_client = llm_client or LlmClient(settings)
+    app.state.conversation_engine = ConversationEngine(app.state.llm_client)
+    app.state.rate_limiter = RateLimiter(
+        enabled=settings.rate_limit_enabled,
+        per_minute=settings.rate_limit_per_minute,
+    )
+    app.state.twilio_client = twilio_client or TwilioClient(settings)
+    app.state.call_registry = call_registry or CallRegistry()
+
+    @app.middleware("http")
+    async def rate_limit_middleware(request: Request, call_next):
+        limiter: RateLimiter = request.app.state.rate_limiter
+        if request.url.path.startswith("/api/") and request.method in {"POST", "DELETE"}:
+            client_ip = request.client.host if request.client else "unknown"
+            allowed, retry_after = limiter.check(client_ip)
+            if not allowed:
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "error": {
+                            "code": "RATE_LIMITED",
+                            "message": "Too many requests. Please slow down.",
+                            "retryable": True,
+                            "details": None,
+                        }
+                    },
+                    headers={"Retry-After": str(retry_after)},
+                )
+        return await call_next(request)
+
+    @app.exception_handler(AppError)
+    async def app_error_handler(request: Request, exc: AppError):
+        settings_obj: Settings = request.app.state.settings
+        logger.warning(
+            "Request failed: %s %s -> %s", request.method, request.url.path, exc.code
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error": {
+                    "code": exc.code,
+                    "message": exc.message,
+                    "retryable": exc.retryable,
+                    "details": exc.details,
+                }
+            },
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_error_handler(request: Request, exc: Exception):
+        settings_obj: Settings = request.app.state.settings
+        logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+        details = f"{type(exc).__name__}: {exc}" if settings_obj.debug else None
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": {
+                    "code": "INTERNAL_ERROR",
+                    "message": "Unexpected server error. See logs for details.",
+                    "retryable": True,
+                    "details": details,
+                }
+            },
+        )
+
+    app.include_router(router)
+    app.include_router(call_router)
+    if FRONTEND_DIR.is_dir():
+        app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+
+        @app.get("/", include_in_schema=False)
+        def index() -> HTMLResponse:
+            return HTMLResponse(FRONTEND_DIR.joinpath("index.html").read_text(encoding="utf-8"))
+
+    return app
+
+
+app = build_app()

@@ -1,0 +1,24 @@
+# Runs ONLY the Sarvam Cloud Lead Agent MVP.
+# All speech/LLM calls go to the Sarvam AI cloud (no local services needed).
+# Set SARVAM_API_KEY in .env (the real .env is never committed).
+#
+# To run:  docker compose up --build
+
+services:
+  sarvam-lead-agent:
+    build: .
+    container_name: sarvam-lead-agent
+    ports:
+      - "${APP_PORT:-8021}:8021"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=sqlite:////app/data/sarvam_leads.db
+    volumes:
+      - sarvam-data:/app/data
+      - sarvam-storage:/app/storage
+    restart: unless-stopped
+
+volumes:
+  sarvam-data:
+  sarvam-storage:

@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sarvam Cloud Lead Agent</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <h1>Sarvam Cloud Lead Agent</h1>
+      <p class="subtitle">Voice lead qualification on the Sarvam AI cloud (STT + TTS)</p>
+    </div>
+    <div class="badges">
+      <span id="provider-badge" class="badge badge-neutral" role="status">Provider: checking…</span>
+      <span id="mic-badge" class="badge badge-neutral" role="status">Microphone: unknown</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel conversation-panel" aria-label="Conversation">
+      <div class="controls">
+        <button id="start-btn" class="btn btn-primary">Start conversation</button>
+        <button id="talk-btn" class="btn btn-talk" disabled>Hold to talk</button>
+        <button id="toggle-mode-btn" class="btn btn-secondary" disabled>Use tap-to-talk</button>
+        <button id="stop-audio-btn" class="btn btn-secondary" disabled>Stop audio</button>
+        <button id="reset-btn" class="btn btn-secondary" disabled>Reset</button>
+      </div>
+
+      <div class="call-bar" aria-label="Phone call">
+        <input id="call-number" type="tel" placeholder="Your phone number, e.g. +919876543210" aria-label="Phone number" />
+        <button id="call-btn" class="btn btn-call">Call my phone</button>
+        <span id="call-status" class="call-status" role="status"></span>
+      </div>
+
+      <div class="status-row">
+        <span id="rec-indicator" class="indicator hidden" role="status">REC</span>
+        <span id="processing-indicator" class="indicator hidden" role="status">Processing…</span>
+        <span id="speaking-indicator" class="indicator hidden" role="status">Agent speaking…</span>
+        <span id="level-meter" class="level-meter" aria-hidden="true"><span id="level-bar"></span></span>
+      </div>
+
+      <div id="notice" class="notice">
+        Speech and language processing run on the Sarvam AI cloud. Per-turn cost is estimated from the configured rates.
+      </div>
+
+      <div id="error-box" class="error-box hidden" role="alert"></div>
+
+      <div id="transcript" class="transcript" aria-live="polite" aria-label="Conversation transcript">
+        <p class="empty-hint">Start a conversation to begin. Speak or type to qualify a lead.</p>
+      </div>
+
+      <form id="text-form" class="text-form" autocomplete="off">
+        <label for="text-input" class="visually-hidden">Type a message</label>
+        <input id="text-input" type="text" placeholder="Type a message instead of talking…" disabled />
+        <button id="send-btn" class="btn btn-primary" type="submit" disabled>Send</button>
+      </form>
+    </section>
+
+    <aside class="panel lead-panel" aria-label="Lead information">
+      <h2>Lead details</h2>
+      <div class="score-box">
+        <div>
+          <span class="score-label">Score</span>
+          <span id="score" class="score-value">–</span>
+        </div>
+        <span id="level" class="level-chip chip-neutral">–</span>
+      </div>
+      <p class="missing"><strong>Missing:</strong> <span id="missing-fields">–</span></p>
+      <p class="next-action"><strong>Next action:</strong> <span id="next-action">–</span></p>
+      <p class="cost-line"><strong>Estimated cost:</strong> <span id="cost-estimate">₹0.00 this turn / ₹0.00 total</span></p>
+      <div id="lead-fields" class="lead-fields"></div>
+      <div class="export-row">
+        <button id="export-json-btn" class="btn btn-secondary" disabled>Export JSON</button>
+        <button id="export-csv-btn" class="btn btn-secondary" disabled>Export CSV</button>
+      </div>
+    </aside>
+  </main>
+
+  <section id="debug-panel" class="panel debug-panel hidden" aria-label="Debug panel">
+    <h2>Debug</h2>
+    <pre id="debug-output"></pre>
+  </section>
+
+  <footer class="app-footer">
+    <p>
+      Privacy: recordings are sent to the Sarvam AI cloud for transcription and
+      voice synthesis. Cost figures are estimates from configured rates; the
+      Sarvam invoice is authoritative.
+    </p>
+  </footer>
+
+  <script src="/static/js/app.js" defer></script>
+</body>
+</html>
