@@ -58,6 +58,13 @@ class LlmClient:
         last_error: Exception | None = None
         attempts = 1 + MAX_RETRIES
         body: dict = {"model": self._settings.llm_model, "messages": messages, "temperature": 0.2}
+        reasoning = (self._settings.llm_reasoning_effort or "").strip().lower()
+        if reasoning in {"none", "off", "disabled", "false"}:
+            body["reasoning_effort"] = None
+        elif reasoning:
+            body["reasoning_effort"] = reasoning
+        if self._settings.llm_max_tokens:
+            body["max_tokens"] = self._settings.llm_max_tokens
         if self._settings.llm_use_json_mode:
             body["response_format"] = {"type": "json_object"}
         url = self._chat_url()

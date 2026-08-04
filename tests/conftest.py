@@ -17,12 +17,23 @@ os.environ["DATABASE_URL"] = (
 )
 os.environ["SARVAM_API_KEY"] = ""
 os.environ["LLM_API_KEY"] = ""
+os.environ["LLM_REASONING_EFFORT"] = ""
+# Blank any Twilio values that a developer's local .env may contain, so tests
+# never hit the real Twilio API or leak credentials.
+os.environ["TWILIO_ACCOUNT_SID"] = ""
+os.environ["TWILIO_AUTH_TOKEN"] = ""
+os.environ["TWILIO_PHONE_NUMBER"] = ""
+os.environ["TWILIO_FROM_NUMBER"] = ""
+os.environ["TWILIO_TEST_PHONE_NUMBER"] = ""
+os.environ["TWILIO_VERIFIED_NUMBERS"] = ""
+os.environ["PUBLIC_BASE_URL"] = ""
+os.environ["TWILIO_CALL_PUBLIC_BASE_URL"] = ""
 
 from backend.config import Settings
 from backend.main import build_app
 from backend.providers.llm_client import LlmClient
 from backend.providers.sarvam_client import SarvamClient
-from backend.telephony.twilio_client import TwilioClient
+from backend.telephony.twilio_service import TwilioService
 
 
 def make_settings(tmp_path, **overrides) -> Settings:
@@ -46,17 +57,54 @@ def make_mock_sarvam_client(settings, handler):
     return SarvamClient(settings, http_client=httpx.AsyncClient(transport=transport))
 
 
-def twilio_handler(request: httpx.Request) -> httpx.Response:
-    if request.url.path.endswith("/Calls.json"):
-        return httpx.Response(201, json={"sid": "CA-test-call-sid", "status": "queued"})
-    if "/Calls/" in request.url.path and request.url.path.endswith(".json"):
-        return httpx.Response(200, json={"sid": "CA-test-call-sid", "status": "completed"})
-    return httpx.Response(404, json={})
+class FakeCallInstance:
+    def __init__(self, sid="CA-test-call-sid", status="queued", to=None, from_=None):
+        self.sid = sid
+        self.status = status
+        self.to = to
+        self._from = from_
+
+
+class FakeCalls:
+    def __init__(self):
+        self.created: list[dict] = []
+        self.updated: list[str] = []
+
+    def create(self, to, from_, url=None, status_callback=None, status_callback_event=None):
+        self.created.append(
+            {"to": to, "from_": from_, "url": url, "status_callback": status_callback}
+        )
+        return FakeCallInstance(sid="CA-test-call-sid", status="queued", to=to, from_=from_)
+
+    def __call__(self, sid):
+        self.updated.append(sid)
+        return FakeCallInstance(sid=sid, status="completed")
+
+
+class FakeOutgoingCallerId:
+    def __init__(self, phone_number, friendly_name=""):
+        self.phone_number = phone_number
+        self.friendly_name = friendly_name
+
+
+class FakeOutgoingCallerIds:
+    def __init__(self, numbers=("+917048211715",)):
+        self.numbers = list(numbers)
+
+    def list(self, limit=None):
+        return [FakeOutgoingCallerId(n) for n in self.numbers]
+
+
+class FakeTwilioClient:
+    def __init__(self):
+        self.calls = FakeCalls()
+        self.outgoing_caller_ids = FakeOutgoingCallerIds()
 
 
 def make_mock_twilio_client(settings):
-    transport = httpx.MockTransport(twilio_handler)
-    return TwilioClient(settings, http_client=httpx.AsyncClient(transport=transport))
+    """Build a TwilioService backed by a fake SDK client (no network)."""
+    service = TwilioService(settings, client=FakeTwilioClient())
+    return service
 
 
 def _wav_bytes() -> bytes:
@@ -169,8 +217,9 @@ def settings(tmp_path):
         llm_api_key="test-key",
         twilio_account_sid="AC-test",
         twilio_auth_token="token-test",
-        twilio_from_number="+15005550006",
-        twilio_call_public_base_url="https://example.ngrok-free.app",
+        twilio_phone_number="+15005550006",
+        public_base_url="https://example.ngrok-free.app",
+        twilio_test_phone_number="+919876543210",
     )
 
 

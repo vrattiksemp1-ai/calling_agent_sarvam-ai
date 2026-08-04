@@ -25,7 +25,7 @@ from backend.metrics import TurnTimings
 from backend.models import Message, Session
 from backend.providers.sarvam_client import SarvamClient
 from backend.telephony import mulaw
-from backend.telephony.twilio_client import TwilioClient
+from backend.telephony.twilio_service import TwilioService
 from backend.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -87,7 +87,7 @@ class CallSession:
         session_factory,
         engine: ConversationEngine,
         sarvam: SarvamClient,
-        twilio: TwilioClient,
+        twilio: TwilioService,
         registry: CallRegistry,
         ws: WebSocket,
     ) -> None:
@@ -103,6 +103,7 @@ class CallSession:
         self._call_sid: str | None = None
         self._session_id: str | None = None
         self._busy = False
+        self._playing = False
         self._completed = False
         self._utterance = bytearray()
         self._speech_chunks = 0
@@ -127,13 +128,24 @@ class CallSession:
             {"event": "mark", "streamSid": self._stream_sid, "mark": {"name": name}}
         )
 
+    async def _send_clear(self) -> None:
+        """Tell Twilio to stop playing the agent's audio (barge-in)."""
+        await self._send({"event": "clear", "streamSid": self._stream_sid})
+
     async def _stream_wav(self, wav_bytes: bytes) -> None:
         mulaw_bytes = mulaw.tts_wav_to_mulaw(wav_bytes)
         if not mulaw_bytes:
             return
-        for i in range(0, len(mulaw_bytes), 160):
-            await self._send_media(mulaw_bytes[i:i + 160])
-        await self._send_mark("reply_done")
+        self._playing = True
+        try:
+            for i in range(0, len(mulaw_bytes), 160):
+                if not self._playing:
+                    break
+                await self._send_media(mulaw_bytes[i:i + 160])
+            if self._playing:
+                await self._send_mark("reply_done")
+        finally:
+            self._playing = False
 
     async def _speak(self, text: str) -> None:
         try:
@@ -231,14 +243,28 @@ class CallSession:
         values = struct.unpack(f"<{count}h", pcm16)
         return max(abs(v) for v in values)
 
-    def _feed(self, payload_b64: str) -> None:
-        if self._busy:
-            self._utterance.clear()
-            self._speech_chunks = 0
-            self._silence_chunks = 0
-            return
+    async def _feed(self, payload_b64: str) -> bool:
+        """Feed one inbound chunk; returns True when a full utterance is ready.
+
+        While the agent is speaking, any inbound speech triggers barge-in: the
+        reply audio is cleared and the caller's interrupt becomes a fresh
+        utterance.
+        """
         pcm16 = mulaw.base64_to_mulaw(payload_b64)
-        if self._energy(pcm16) > SPEECH_ENERGY:
+        energy = self._energy(pcm16)
+
+        if self._playing:
+            if energy > SPEECH_ENERGY:
+                await self._clear_playback()
+                self._utterance.extend(pcm16)
+                self._speech_chunks = 1
+                self._silence_chunks = 0
+            return False
+
+        if self._busy:
+            return False
+
+        if energy > SPEECH_ENERGY:
             self._utterance.extend(pcm16)
             self._speech_chunks += 1
             self._silence_chunks = 0
@@ -253,11 +279,20 @@ class CallSession:
             or self._speech_chunks >= MAX_UTTERANCE_CHUNKS
         ):
             self._busy = True
+            return True
+        return False
+
+    async def _clear_playback(self) -> None:
+        """Abort outgoing agent audio and reset playback state for barge-in."""
+        if self._playing:
+            self._playing = False
+            await self._send_clear()
 
     # ---------- main loop ----------
 
     async def run(self) -> None:
         await self._ws.accept()
+        logger.info("Media stream connected: waiting for start event")
         try:
             while True:
                 message = await self._ws.receive_json()
@@ -266,6 +301,11 @@ class CallSession:
                     start = message.get("start") or {}
                     self._stream_sid = start.get("streamSid") or message.get("streamSid")
                     self._call_sid = start.get("callSid") or message.get("callSid")
+                    logger.info(
+                        "Stream start: callSid=%s streamSid=%s",
+                        self._call_sid,
+                        self._stream_sid,
+                    )
                     if self._call_sid and self._registry.get(self._call_sid) is None:
                         self._registry.add(
                             CallRecord(
@@ -283,8 +323,7 @@ class CallSession:
                 elif event == "media":
                     media = message.get("media") or {}
                     payload = media.get("payload") or ""
-                    self._feed(payload)
-                    if self._busy and self._utterance:
+                    if await self._feed(payload):
                         await self._handle_utterance()
                         self._busy = False
                         if self._completed:

@@ -71,6 +71,8 @@ flowchart LR
 ### Features
 
 - Voice + text conversation modes; push-to-talk and tap-to-talk
+- **Outbound phone calls** via Twilio Media Streams with live barge-in, a
+  verified-number dropdown, trial-mode allow-listing, and signed webhooks
 - English / Hindi / Hinglish detection and replies (TTS language auto-maps)
 - 21-field structured lead capture with per-field change history
 - Explicit **consent** gate (`consent_to_contact`) before the summary is shown;
@@ -154,6 +156,18 @@ All settings come from environment variables or a local `.env` file. See
 | `TTS_RATE_PER_10K_CHARS_INR` | `30` | TTS cost estimate per 10k chars |
 | `LLM_INPUT_RATE_PER_MILLION_INR` | `4` | LLM input token rate |
 | `LLM_OUTPUT_RATE_PER_MILLION_INR` | `16` | LLM output token rate |
+| `TWILIO_ACCOUNT_SID` | *(empty)* | Twilio account SID (outbound calls) |
+| `TWILIO_AUTH_TOKEN` | *(empty)* | Twilio auth token (never exposed to the browser) |
+| `TWILIO_PHONE_NUMBER` | *(empty)* | The Twilio number calls are placed **from** (E.164) |
+| `PUBLIC_BASE_URL` | *(empty)* | Public HTTPS URL (ngrok) so Twilio reaches this app |
+| `TWILIO_TEST_PHONE_NUMBER` | *(empty)* | Verified fallback number allowed in trial mode |
+| `TWILIO_VERIFIED_NUMBERS` | *(empty)* | Comma-separated extra verified fallback numbers |
+| `TWILIO_TRIAL_MODE` | `true` | Restrict calls to Twilio-verified numbers |
+| `TWILIO_STATUS_CALLBACK_URL` | *(empty)* | Status webhook URL (derived from `PUBLIC_BASE_URL` if empty) |
+| `CALL_RATE_LIMIT_PER_MINUTE` | `5` | Stricter limit for `POST /api/calls` |
+
+> Backwards-compatible aliases: `TWILIO_FROM_NUMBER` (= `TWILIO_PHONE_NUMBER`)
+> and `TWILIO_CALL_PUBLIC_BASE_URL` (= `PUBLIC_BASE_URL`) still work.
 
 ---
 
@@ -177,6 +191,46 @@ All settings come from environment variables or a local `.env` file. See
 | `GET` | `/api/leads/{id}/export.json` | JSON export |
 | `GET` | `/api/leads/{id}/export.csv` | CSV export |
 | `DELETE` | `/api/leads/{id}` | Delete a lead |
+
+### Outbound phone calls (Twilio)
+
+The web UI can place a real outbound call to a **verified destination number**
+and the lead-qualification agent talks over the call via Twilio Media Streams,
+with **live barge-in** (the agent stops mid-sentence if the caller interrupts).
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/calls/numbers` | Verified destination numbers (populates the UI dropdown) |
+| `POST` | `/api/calls` | Place a call `{"to": "+91..."}` (E.164 + trial allow-list check) |
+| `GET` | `/api/calls/{sid}` | Call status |
+| `DELETE` | `/api/calls/{sid}` | Hang up |
+| `POST` | `/api/calls/twiml` | TwiML served to Twilio (opens the Media Stream WebSocket) |
+| `POST` | `/api/calls/status` | Status callback webhook (Twilio signature-validated) |
+| `WS` | `/api/calls/stream` | Twilio Media Streams two-way audio |
+
+Setup (trial account):
+
+1. Add `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` and `TWILIO_PHONE_NUMBER`
+   (`+17372508034`) to `.env`.
+2. Verify destination numbers in the **Twilio Console** (Outgoing Caller IDs).
+   The call page dropdown is populated live from Twilio, so a newly verified
+   number appears without any code change.
+3. Run a public HTTPS tunnel to this app so Twilio can reach the Media Streams
+   WebSocket and status webhook, e.g. `ngrok http 8021`, then set
+   `PUBLIC_BASE_URL=https://abc123.ngrok-free.app`.
+4. Restart and open the UI: choose a verified number from the dropdown and press
+   **Call my phone**.
+
+Security notes:
+
+- Credentials live only in the backend `.env`; they are never sent to the
+  browser and never logged. The Twilio SDK errors are mapped to safe messages.
+- `POST /api/calls/status` rejects any webhook whose
+  `X-Twilio-Signature` cannot be verified with `TWILIO_AUTH_TOKEN`.
+- Trial mode (`TWILIO_TRIAL_MODE=true`) blocks calls to anything not in the
+  Twilio verified numbers (or `TWILIO_TEST_PHONE_NUMBER` /
+  `TWILIO_VERIFIED_NUMBERS`). Set it to `false` on a paid account.
+- `POST /api/calls` additionally respects `CALL_RATE_LIMIT_PER_MINUTE`.
 
 ### Structured LLM response shape
 

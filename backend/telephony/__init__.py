@@ -7,9 +7,9 @@ each utterance through the existing STT -> LLM -> TTS pipeline, and streams the
 synthesised reply back over the call.
 
 Nothing here is required to run the web MVP - the feature is inert until
-TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_FROM_NUMBER are configured.
+TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_PHONE_NUMBER are configured.
 """
 
-from backend.telephony.twilio_client import TwilioClient
+from backend.telephony.twilio_service import TwilioService
 
-__all__ = ["TwilioClient"]
+__all__ = ["TwilioService"]

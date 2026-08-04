@@ -6,6 +6,7 @@ or FastAPI TestClient - no real keys, accounts or phone calls are used.
 
 import base64
 import math
+import re
 import struct
 import sys
 from pathlib import Path
@@ -21,14 +22,20 @@ from backend.errors import AppError
 from backend.main import build_app
 from backend.telephony import mulaw
 from backend.telephony.call_manager import CallRecord, CallRegistry
-from backend.telephony.twilio_client import CallNotConfiguredError, TwilioClient
+from backend.telephony.twilio_service import (
+    CallNotAllowedError,
+    CallNotConfiguredError,
+    TwilioService,
+)
 
 from conftest import (
+    FakeTwilioClient,
     lead_llm_handler,
     make_mock_llm_client,
     make_mock_sarvam_client,
     make_mock_twilio_client,
     make_settings,
+    sarvam_handler,
 )
 
 SAMPLE_RATE = 8000
@@ -91,71 +98,234 @@ def test_tts_wav_to_mulaw_empty():
     assert mulaw.tts_wav_to_mulaw(b"") == b""
 
 
-# ---------- Twilio client ----------
+# ---------- Twilio service ----------
 
 
-@pytest.mark.asyncio
-async def test_twilio_start_outbound_call(tmp_path):
-    settings = make_settings(
+def _service_settings(tmp_path) -> Settings:
+    return make_settings(
         tmp_path,
         twilio_account_sid="AC123",
         twilio_auth_token="tok",
-        twilio_from_number="+15005550006",
-        twilio_call_public_base_url="https://x.ngrok-free.app",
+        twilio_phone_number="+15005550006",
+        public_base_url="https://x.ngrok-free.app",
+        twilio_test_phone_number="+919876543210",
     )
-    client = make_mock_twilio_client(settings)
-    sid = await client.start_outbound_call("+919876543210")
-    assert sid == "CA-test-call-sid"
 
 
 @pytest.mark.asyncio
-async def test_twilio_start_outbound_call_not_configured(tmp_path):
-    settings = make_settings(tmp_path)
-    client = TwilioClient(settings, http_client=httpx.AsyncClient())
-    with pytest.raises(CallNotConfiguredError):
-        await client.start_outbound_call("+919876543210")
-    await client.aclose()
+async def test_twilio_service_start_call(tmp_path):
+    settings = _service_settings(tmp_path)
+    service = make_mock_twilio_client(settings)
+    result = await service.start_call("+919876543210")
+    assert result.call_sid == "CA-test-call-sid"
+    assert result.to == "+919876543210"
+    assert result.from_ == "+15005550006"
+    created = service._client.calls.created[-1]
+    assert created["to"] == "+919876543210"
+    assert created["from_"] == "+15005550006"
+    assert "api/calls/twiml" in created["url"]
 
 
 @pytest.mark.asyncio
-async def test_twilio_start_outbound_call_missing_public_url(tmp_path):
-    settings = make_settings(
-        tmp_path,
-        twilio_account_sid="AC123",
-        twilio_auth_token="tok",
-        twilio_from_number="+15005550006",
-    )
-    client = TwilioClient(settings, http_client=httpx.AsyncClient())
+async def test_twilio_service_start_call_normalizes_e164(tmp_path):
+    settings = _service_settings(tmp_path)
+    service = make_mock_twilio_client(settings)
+    result = await service.start_call(" 919876543210 ")
+    assert result.to == "+919876543210"
+
+
+@pytest.mark.asyncio
+async def test_twilio_service_rejects_invalid_number(tmp_path):
+    settings = _service_settings(tmp_path)
+    service = make_mock_twilio_client(settings)
     with pytest.raises(AppError) as exc:
-        await client.start_outbound_call("+919876543210")
-    assert exc.value.code == "CALL_NOT_CONFIGURED"
-    await client.aclose()
+        await service.start_call("+12")
+    assert exc.value.code == "INVALID_PHONE_NUMBER"
+    assert service._client.calls.created == []
 
 
 @pytest.mark.asyncio
-async def test_twilio_complete_call(tmp_path):
+async def test_twilio_service_start_call_not_configured(tmp_path):
+    settings = make_settings(tmp_path)
+    service = TwilioService(settings, client=FakeTwilioClient())
+    with pytest.raises(CallNotConfiguredError):
+        await service.start_call("+919876543210")
+
+
+@pytest.mark.asyncio
+async def test_twilio_service_start_call_missing_public_url(tmp_path):
     settings = make_settings(
         tmp_path,
         twilio_account_sid="AC123",
         twilio_auth_token="tok",
-        twilio_from_number="+15005550006",
-        twilio_call_public_base_url="https://x.ngrok-free.app",
+        twilio_phone_number="+15005550006",
     )
-    client = make_mock_twilio_client(settings)
-    await client.complete_call("CA-test-call-sid")
+    service = TwilioService(settings, client=FakeTwilioClient())
+    with pytest.raises(AppError) as exc:
+        await service.start_call("+919876543210")
+    assert exc.value.code == "CALL_NOT_CONFIGURED"
 
 
-def test_twilio_twiml_contains_stream_url():
+@pytest.mark.asyncio
+async def test_twilio_service_trial_blocks_unverified_number(tmp_path):
+    settings = _service_settings(tmp_path)
+    service = make_mock_twilio_client(settings)
+    with pytest.raises(CallNotAllowedError):
+        await service.start_call("+14155552671")
+    assert service._client.calls.created == []
+
+
+@pytest.mark.asyncio
+async def test_twilio_service_trial_allows_verified_number(tmp_path):
+    settings = _service_settings(tmp_path)
+    service = make_mock_twilio_client(settings)
+    result = await service.start_call("+917048211715")
+    assert result.call_sid == "CA-test-call-sid"
+
+
+@pytest.mark.asyncio
+async def test_twilio_service_trial_off_skips_check(tmp_path):
+    settings = make_settings(
+        tmp_path,
+        twilio_account_sid="AC123",
+        twilio_auth_token="tok",
+        twilio_phone_number="+15005550006",
+        public_base_url="https://x.ngrok-free.app",
+        twilio_trial_mode=False,
+    )
+    service = make_mock_twilio_client(settings)
+    result = await service.start_call("+14155552671")
+    assert result.call_sid == "CA-test-call-sid"
+
+
+@pytest.mark.asyncio
+async def test_twilio_service_verified_numbers(tmp_path):
+    settings = _service_settings(tmp_path)
+    service = make_mock_twilio_client(settings)
+    numbers = await service.verified_numbers()
+    assert "+919876543210" in numbers  # env fallback
+    assert "+917048211715" in numbers  # from the Twilio OutgoingCallerIds API
+
+
+@pytest.mark.asyncio
+async def test_twilio_service_complete_call(tmp_path):
+    settings = _service_settings(tmp_path)
+    service = make_mock_twilio_client(settings)
+    await service.complete_call("CA-test-call-sid")
+    assert "CA-test-call-sid" in service._client.calls.updated
+
+
+@pytest.mark.asyncio
+async def test_twilio_service_complete_call_not_configured(tmp_path):
+    settings = make_settings(tmp_path)
+    service = TwilioService(settings, client=FakeTwilioClient())
+    await service.complete_call("CA-x")  # no-op, no crash
+
+
+def test_twilio_service_twiml_contains_stream_url():
     settings = Settings(
         twilio_account_sid="AC",
         twilio_auth_token="t",
-        twilio_from_number="+1",
-        twilio_call_public_base_url="https://abc.ngrok-free.app/",
+        twilio_phone_number="+1",
+        public_base_url="https://abc.ngrok-free.app/",
     )
-    client = TwilioClient(settings, http_client=httpx.AsyncClient())
-    twiml = client.stream_twiml()
+    service = TwilioService(settings, client=FakeTwilioClient())
+    twiml = service.stream_twiml()
     assert "wss://abc.ngrok-free.app/api/calls/stream" in twiml
-    assert "<Connect>" in twiml
+    assert "<Start>" in twiml
+    assert "<Pause" in twiml
+
+
+def test_twilio_service_signature_validation():
+    settings = Settings(
+        twilio_account_sid="AC",
+        twilio_auth_token="tok",
+        twilio_phone_number="+1",
+        public_base_url="https://abc.ngrok-free.app",
+    )
+    service = TwilioService(settings, client=FakeTwilioClient())
+    from twilio.request_validator import RequestValidator
+
+    params = {"CallStatus": "completed", "CallSid": "CA1"}
+    sig = RequestValidator("tok").compute_signature("https://abc.ngrok-free.app/api/calls/status", params)
+    assert service.validate_signature("https://abc.ngrok-free.app/api/calls/status", params, sig)
+    assert not service.validate_signature("https://abc.ngrok-free.app/api/calls/status", params, "bad")
+
+
+def test_twilio_service_signature_missing_token():
+    settings = Settings(
+        twilio_account_sid="AC",
+        twilio_auth_token="",
+        twilio_phone_number="+1",
+        public_base_url="https://abc.ngrok-free.app",
+    )
+    service = TwilioService(settings, client=FakeTwilioClient())
+    assert not service.validate_signature("https://abc.ngrok-free.app/api/calls/status", {}, "whatever")
+
+
+def test_twilio_service_turn_url_includes_token():
+    settings = Settings(
+        twilio_account_sid="AC",
+        twilio_auth_token="t",
+        twilio_phone_number="+1",
+        public_base_url="https://abc.ngrok-free.app",
+        twilio_turn_webhook_secret="secret123",
+    )
+    service = TwilioService(settings, client=FakeTwilioClient())
+    assert service.turn_url() == (
+        "https://abc.ngrok-free.app/api/calls/turn?turn_token=secret123"
+        + "#ct=10000&rt=15000&tt=15000&rc=3&rp=ct,rt,5xx"
+    )
+
+
+def test_twilio_service_turn_url_without_token_when_unconfigured():
+    settings = Settings(
+        twilio_account_sid="AC",
+        twilio_auth_token="t",
+        twilio_phone_number="+1",
+        public_base_url="https://abc.ngrok-free.app",
+        twilio_turn_webhook_secret="",
+    )
+    service = TwilioService(settings, client=FakeTwilioClient())
+    assert service.turn_url() == (
+        "https://abc.ngrok-free.app/api/calls/turn"
+        + "#ct=10000&rt=15000&tt=15000&rc=3&rp=ct,rt,5xx"
+    )
+
+
+def test_twilio_service_turn_callback_prefers_signature():
+    settings = Settings(
+        twilio_account_sid="AC",
+        twilio_auth_token="tok",
+        twilio_phone_number="+1",
+        public_base_url="https://abc.ngrok-free.app",
+        twilio_turn_webhook_secret="secret123",
+    )
+    service = TwilioService(settings, client=FakeTwilioClient())
+    from twilio.request_validator import RequestValidator
+
+    url = "https://abc.ngrok-free.app/api/calls/turn?turn_token=secret123"
+    params = {"CallSid": "CA1", "SpeechResult": "hi"}
+    sig = RequestValidator("tok").compute_signature(url, params)
+    assert service.validate_turn_callback(url, params, sig, "")
+    # a wrong token is irrelevant when the signature is valid
+    assert service.validate_turn_callback(url, params, sig, "bogus")
+    assert not service.validate_turn_callback(url, params, "bogus-sig", "secret123")
+
+
+def test_twilio_service_turn_callback_token_when_unsigned():
+    settings = Settings(
+        twilio_account_sid="AC",
+        twilio_auth_token="tok",
+        twilio_phone_number="+1",
+        public_base_url="https://abc.ngrok-free.app",
+        twilio_turn_webhook_secret="secret123",
+    )
+    service = TwilioService(settings, client=FakeTwilioClient())
+    url = "https://abc.ngrok-free.app/api/calls/turn?turn_token=secret123"
+    assert service.validate_turn_callback(url, {"CallSid": "CA1"}, "", "secret123")
+    assert not service.validate_turn_callback(url, {"CallSid": "CA1"}, "", "wrong")
+    assert not service.validate_turn_callback(url, {"CallSid": "CA1"}, "", "")
 
 
 # ---------- registry ----------
@@ -192,8 +362,9 @@ def _call_app(tmp_path) -> TestClient:
         llm_api_key="x",
         twilio_account_sid="AC123",
         twilio_auth_token="tok",
-        twilio_from_number="+15005550006",
-        twilio_call_public_base_url="https://x.ngrok-free.app",
+        twilio_phone_number="+15005550006",
+        public_base_url="https://x.ngrok-free.app",
+        twilio_test_phone_number="+917048211715",
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -228,10 +399,10 @@ def test_place_call_and_status(client):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["call_sid"] == "CA-test-call-sid"
-    assert body["status"] == "initiated"
+    assert body["status"] == "queued"
 
     status = client.get("/api/calls/CA-test-call-sid")
-    assert status.json()["status"] == "initiated"
+    assert status.json()["status"] == "queued"
 
     hang = client.delete("/api/calls/CA-test-call-sid")
     assert hang.status_code == 200
@@ -254,14 +425,203 @@ def test_place_call_not_configured(tmp_path):
         assert resp.json()["error"]["code"] == "CALL_NOT_CONFIGURED"
 
 
+def test_place_call_rejects_invalid_e164(client):
+    resp = client.post("/api/calls", json={"to": "not-a-number"})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "INVALID_PHONE_NUMBER"
+
+
+def test_place_call_trial_blocks_unverified(client):
+    resp = client.post("/api/calls", json={"to": "+14155552671"})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "CALL_NOT_ALLOWED"
+
+
+def test_verified_numbers_endpoint(client):
+    resp = client.get("/api/calls/numbers")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["trial_mode"] is True
+    assert "+917048211715" in body["verified_numbers"]
+
+
+def test_twiml_endpoint(client):
+    # trial mode -> <Gather input="speech"> turn loop, no <Stream>
+    resp = client.post("/api/calls/twiml")
+    assert resp.status_code == 200
+    assert 'input="speech"' in resp.text
+    assert "<Gather" in resp.text
+    assert "api/calls/turn" in resp.text
+    assert "<Play>" in resp.text
+    assert "<Stream" not in resp.text
+
+
+def test_twiml_endpoint_streaming_when_not_trial(tmp_path):
+    settings = make_settings(
+        tmp_path,
+        sarvam_api_key="x",
+        llm_api_key="x",
+        twilio_account_sid="AC123",
+        twilio_auth_token="tok",
+        twilio_phone_number="+15005550006",
+        public_base_url="https://x.ngrok-free.app",
+        twilio_trial_mode=False,
+    )
+    app = build_app(
+        settings,
+        sarvam_client=make_mock_sarvam_client(settings, sarvam_handler),
+        llm_client=make_mock_llm_client(settings, lead_llm_handler),
+        twilio_client=make_mock_twilio_client(settings),
+    )
+    with TestClient(app) as c:
+        resp = c.post("/api/calls/twiml")
+        assert resp.status_code == 200
+        assert "<Stream" in resp.text
+        assert "wss://x.ngrok-free.app/api/calls/stream" in resp.text
+
+
+def _signed_turn_post(client, speech, call_sid="CA-turn-1", token="token-test"):
+    from twilio.request_validator import RequestValidator
+
+    url = "https://example.ngrok-free.app/api/calls/turn"
+    params = {"CallSid": call_sid, "SpeechResult": speech}
+    sig = RequestValidator(token).compute_signature(url, params)
+    return client.post(
+        "/api/calls/turn",
+        data=params,
+        headers={"X-Twilio-Signature": sig},
+    )
+
+
+def test_turn_webhook_rejects_bad_signature(client):
+    resp = _signed_turn_post(client, "hello", token="wrong-token")
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "INVALID_TWILIO_SIGNATURE"
+
+
+def _turn_app(tmp_path, secret="turn-secret-123"):
+    settings = make_settings(
+        tmp_path,
+        sarvam_api_key="x",
+        llm_api_key="x",
+        twilio_account_sid="AC123",
+        twilio_auth_token="tok",
+        twilio_phone_number="+15005550006",
+        public_base_url="https://x.ngrok-free.app",
+        twilio_test_phone_number="+917048211715",
+        twilio_turn_webhook_secret=secret,
+    )
+    app = build_app(
+        settings,
+        sarvam_client=make_mock_sarvam_client(settings, sarvam_handler),
+        llm_client=make_mock_llm_client(settings, lead_llm_handler),
+        twilio_client=make_mock_twilio_client(settings),
+    )
+    return TestClient(app)
+
+
+def test_turn_webhook_accepts_token_without_signature(tmp_path):
+    client = _turn_app(tmp_path)
+    resp = client.post(
+        "/api/calls/turn?turn_token=turn-secret-123",
+        data={"CallSid": "CA-token-1", "SpeechResult": ""},
+    )
+    assert resp.status_code == 200
+    assert "<Gather" in resp.text
+    assert "api/calls/turn" in resp.text
+
+
+def test_turn_webhook_rejects_bad_token_without_signature(tmp_path):
+    client = _turn_app(tmp_path)
+    resp = client.post(
+        "/api/calls/turn?turn_token=wrong",
+        data={"CallSid": "CA-token-2", "SpeechResult": "hello"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "INVALID_TWILIO_SIGNATURE"
+
+
+def test_turn_twiml_action_url_contains_token(tmp_path):
+    client = _turn_app(tmp_path)
+    resp = client.post("/api/calls/twiml")
+    assert resp.status_code == 200
+    assert 'action="https://x.ngrok-free.app/api/calls/turn?turn_token=turn-secret-123#ct=10000&amp;rt=15000&amp;tt=15000&amp;rc=3&amp;rp=ct,rt,5xx"' in resp.text
+
+
+def test_turn_webhook_empty_speech_reprompts(client):
+    resp = _signed_turn_post(client, "")
+    assert resp.status_code == 200
+    assert "<Gather" in resp.text
+    assert "<Play>" in resp.text
+    assert "<Hangup" not in resp.text
+    assert "api/calls/turn" in resp.text
+
+
+def test_turn_webhook_full_conversation(client):
+    sid = "CA-turn-flow-1"
+    turns = [
+        "my name is rahul sharma",
+        "my phone number is 98765 43210",
+        "I need a CRM",
+        "yes, you can contact me",
+        "confirm yes",
+    ]
+    last = None
+    for speech in turns:
+        last = _signed_turn_post(client, speech, call_sid=sid)
+        assert last.status_code == 200, last.text
+    assert "<Hangup" in last.text
+    assert "<Gather" not in last.text
+
+    status = client.get(f"/api/calls/{sid}").json()
+    assert status["status"] == "in-progress"
+    lead = client.get(f"/api/sessions/{status['session_id']}/lead").json()
+    assert lead["fields"]["full_name"] == "Rahul Sharma"
+    assert lead["conversation_status"] == "completed"
+
+
+def test_turn_audio_endpoint_serves_wav(client):
+    resp = _signed_turn_post(client, "my name is rahul sharma")
+    match = re.search(r"/api/calls/audio/([0-9a-f]+)", resp.text)
+    assert match, resp.text
+    audio = client.get(f"/api/calls/audio/{match.group(1)}")
+    assert audio.status_code == 200
+    assert audio.headers["content-type"].startswith("audio/wav")
+    assert audio.content[:4] == b"RIFF"
+
+
+def _signed_status_post(client, sid, status, token="token-test"):
+    from twilio.request_validator import RequestValidator
+
+    url = "https://example.ngrok-free.app/api/calls/status"
+    params = {"CallSid": sid, "CallStatus": status}
+    sig = RequestValidator(token).compute_signature(url, params)
+    return client.post(
+        "/api/calls/status",
+        data=params,
+        headers={"X-Twilio-Signature": sig},
+    )
+
+
 def test_call_status_callback(client):
     resp = client.post("/api/calls", json={"to": "+919876543210"})
     assert resp.status_code == 200
     sid = resp.json()["call_sid"]
-    resp = client.post(f"/api/calls/{sid}/status", data={"CallStatus": "ringing"})
+    resp = _signed_status_post(client, sid, "ringing")
     assert resp.json()["ok"] is True
     status = client.get(f"/api/calls/{sid}").json()
     assert status["status"] == "ringing"
+
+
+def test_call_status_callback_rejects_bad_signature(client):
+    resp = client.post("/api/calls", json={"to": "+919876543210"})
+    sid = resp.json()["call_sid"]
+    resp = _signed_status_post(client, sid, "completed", token="wrong-token")
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "INVALID_TWILIO_SIGNATURE"
+    # state must be unchanged
+    status = client.get(f"/api/calls/{sid}").json()
+    assert status["status"] == "queued"
 
 
 def test_call_stream_full_flow(tmp_path):
@@ -311,3 +671,95 @@ def test_call_stream_unknown_events_ignored(tmp_path):
         )
         assert _drain_until_mark(ws) >= 0
         ws.send_json({"event": "stop", "streamSid": "STREAM-2"})
+
+
+# ---------- barge-in ----------
+
+
+class FakeWs:
+    def __init__(self):
+        self.sent: list[dict] = []
+
+    async def send_json(self, payload: dict) -> None:
+        self.sent.append(payload)
+
+
+def _make_session(tmp_path, settings=None) -> "object":
+    from backend.telephony.call_manager import CallSession
+
+    settings = settings or make_settings(
+        tmp_path,
+        twilio_account_sid="AC123",
+        twilio_auth_token="tok",
+        twilio_phone_number="+15005550006",
+        public_base_url="https://x.ngrok-free.app",
+    )
+    service = make_mock_twilio_client(settings)
+    session = CallSession(
+        settings=settings,
+        session_factory=None,
+        engine=None,
+        sarvam=None,
+        twilio=service,
+        registry=CallRegistry(),
+        ws=FakeWs(),
+    )
+    session._stream_sid = "STREAM-B"
+    return session
+
+
+@pytest.mark.asyncio
+async def test_barge_in_clears_playback_and_captures_interrupt(tmp_path):
+    session = _make_session(tmp_path)
+    session._playing = True
+    ready = await session._feed(_tone_chunk())
+    assert session._playing is False
+    assert any(e["event"] == "clear" for e in session._ws.sent)
+    assert session._speech_chunks == 1
+    assert ready is False  # interrupt speech still needs a full utterance
+
+
+@pytest.mark.asyncio
+async def test_barge_in_silence_does_not_clear(tmp_path):
+    session = _make_session(tmp_path)
+    session._playing = True
+    ready = await session._feed(_silence_chunk())
+    assert session._playing is True
+    assert not any(e["event"] == "clear" for e in session._ws.sent)
+    assert ready is False
+
+
+@pytest.mark.asyncio
+async def test_barge_in_interrupt_becomes_utterance(tmp_path):
+    session = _make_session(tmp_path)
+    session._playing = True
+    await session._feed(_tone_chunk())  # barge-in starts the utterance
+    for _ in range(11):
+        await session._feed(_tone_chunk())
+    for _ in range(40):
+        await session._feed(_silence_chunk())
+    # the interrupt should now be a complete utterance ready for processing
+    assert session._busy is True
+
+
+def test_call_stream_consecutive_turns(tmp_path):
+    """Two consecutive utterances are handled (interrupt buffer resets cleanly)."""
+    client = _call_app(tmp_path)
+    with client.websocket_connect("/api/calls/stream") as ws:
+        ws.send_json(
+            {
+                "event": "start",
+                "streamSid": "STREAM-1",
+                "start": {"streamSid": "STREAM-1", "callSid": "CA-call-3"},
+            }
+        )
+        assert _drain_until_mark(ws) > 0
+
+        for _ in range(2):
+            for _ in range(12):
+                ws.send_json({"event": "media", "streamSid": "STREAM-1", "media": {"payload": _tone_chunk()}})
+            for _ in range(40):
+                ws.send_json({"event": "media", "streamSid": "STREAM-1", "media": {"payload": _silence_chunk()}})
+            assert _drain_until_mark(ws) > 0
+
+        ws.send_json({"event": "stop", "streamSid": "STREAM-1"})

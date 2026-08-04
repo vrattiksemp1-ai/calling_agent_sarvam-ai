@@ -68,11 +68,24 @@ class Settings(BaseSettings):
     llm_model: str = "sarvam-105b"
     llm_timeout: float = 120.0
     llm_use_json_mode: bool = True
+    # Sarvam reasoning/thinking mode. Empty = leave the provider default (Sarvam
+    # defaults to thinking ON, which adds several seconds of hidden reasoning and
+    # completion cost per turn). "none"/"off"/"false" sends reasoning_effort=null
+    # to disable it; "low"/"medium"/"high" requests that level.
+    llm_reasoning_effort: str = ""
+    llm_max_tokens: int = 0
 
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
+    twilio_phone_number: str = ""
     twilio_from_number: str = ""
+    twilio_test_phone_number: str = ""
+    twilio_verified_numbers: str = ""
+    twilio_trial_mode: bool = True
+    public_base_url: str = ""
     twilio_call_public_base_url: str = ""
+    twilio_status_callback_url: str = ""
+    twilio_turn_webhook_secret: str = ""
     twilio_call_timeout: float = 60.0
 
     default_language: str = "en"
@@ -81,6 +94,7 @@ class Settings(BaseSettings):
     retain_audio: bool = False
     rate_limit_enabled: bool = True
     rate_limit_per_minute: int = 60
+    call_rate_limit_per_minute: int = 5
     allowed_origins: str = ""
     cors_enabled: bool = False
 
@@ -98,6 +112,16 @@ class Settings(BaseSettings):
         if not path.is_absolute():
             path = PROJECT_ROOT / path
         return path
+
+    @property
+    def twilio_from(self) -> str:
+        """The From number to use for outbound calls (new name wins, old kept as alias)."""
+        return self.twilio_phone_number or self.twilio_from_number
+
+    @property
+    def public_base(self) -> str:
+        """Public base URL (new name wins, old kept as alias)."""
+        return self.public_base_url or self.twilio_call_public_base_url
 
     @property
     def cors_origins(self) -> list[str]:

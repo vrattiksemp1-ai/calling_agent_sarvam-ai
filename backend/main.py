@@ -19,7 +19,8 @@ from backend.providers.llm_client import LlmClient
 from backend.providers.sarvam_client import SarvamClient
 from backend.rate_limit import RateLimiter
 from backend.telephony.call_manager import CallRegistry
-from backend.telephony.twilio_client import TwilioClient
+from backend.telephony.turn_flow import TurnFlow
+from backend.telephony.twilio_service import TwilioService
 from backend.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,7 @@ def build_app(
     session_factory=None,
     sarvam_client: SarvamClient | None = None,
     llm_client: LlmClient | None = None,
-    twilio_client: TwilioClient | None = None,
+    twilio_client: TwilioService | None = None,
     call_registry: CallRegistry | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
@@ -75,12 +76,27 @@ def build_app(
         enabled=settings.rate_limit_enabled,
         per_minute=settings.rate_limit_per_minute,
     )
-    app.state.twilio_client = twilio_client or TwilioClient(settings)
+    app.state.call_rate_limiter = RateLimiter(
+        enabled=settings.rate_limit_enabled,
+        per_minute=settings.call_rate_limit_per_minute,
+    )
+    app.state.twilio_client = twilio_client or TwilioService(settings)
     app.state.call_registry = call_registry or CallRegistry()
+    app.state.turn_flow = TurnFlow(
+        settings=settings,
+        session_factory=app.state.session_factory,
+        engine=app.state.conversation_engine,
+        sarvam=app.state.sarvam_client,
+        twilio=app.state.twilio_client,
+        registry=app.state.call_registry,
+    )
 
     @app.middleware("http")
     async def rate_limit_middleware(request: Request, call_next):
-        limiter: RateLimiter = request.app.state.rate_limiter
+        if request.url.path == "/api/calls" and request.method == "POST":
+            limiter: RateLimiter = request.app.state.call_rate_limiter
+        else:
+            limiter: RateLimiter = request.app.state.rate_limiter
         if request.url.path.startswith("/api/") and request.method in {"POST", "DELETE"}:
             client_ip = request.client.host if request.client else "unknown"
             allowed, retry_after = limiter.check(client_ip)
@@ -136,6 +152,15 @@ def build_app(
 
     app.include_router(router)
     app.include_router(call_router)
+
+    @app.middleware("http")
+    async def no_cache_static(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/static") or request.url.path == "/":
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
     if FRONTEND_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 

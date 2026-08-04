@@ -30,6 +30,7 @@ const els = {
   debugPanel: $("debug-panel"),
   debugOutput: $("debug-output"),
   callNumber: $("call-number"),
+  callNumberCustom: $("call-number-custom"),
   callBtn: $("call-btn"),
   callStatus: $("call-status"),
 };
@@ -48,6 +49,7 @@ const state = {
   audioEl: null,
   audio: null,
   totalCost: 0,
+  callTrialMode: true,
 };
 
 /* ---------- helpers ---------- */
@@ -421,10 +423,49 @@ function exportLead(format) {
 
 /* ---------- phone call ---------- */
 
+async function initCallPicker() {
+  let numbers = [];
+  try {
+    const data = await api("/api/calls/numbers");
+    numbers = data.verified_numbers || [];
+    state.callTrialMode = !!data.trial_mode;
+  } catch (_) {
+    state.callTrialMode = true;
+  }
+
+  const select = els.callNumber;
+  select.innerHTML = "";
+
+  if (state.callTrialMode) {
+    els.callNumberCustom.style.display = "none";
+    select.style.display = "";
+    if (numbers.length === 0) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "No verified numbers — add one in the Twilio Console";
+      opt.disabled = true;
+      opt.selected = true;
+      select.appendChild(opt);
+    } else {
+      numbers.forEach((n) => {
+        const opt = document.createElement("option");
+        opt.value = n;
+        opt.textContent = n;
+        select.appendChild(opt);
+      });
+    }
+  } else {
+    select.style.display = "none";
+    els.callNumberCustom.style.display = "";
+  }
+}
+
 async function placeCall() {
-  const number = els.callNumber.value.trim();
+  const number = (els.callNumber.value || els.callNumberCustom.value || "").trim();
   if (!number) {
-    showError("Enter your phone number first (E.164 format, e.g. +919876543210).");
+    showError(state.callTrialMode
+      ? "Choose a verified destination number from the dropdown first."
+      : "Enter the destination number first (E.164 format, e.g. +919876543210).");
     return;
   }
   clearError();
@@ -472,6 +513,7 @@ els.exportCsvBtn.addEventListener("click", () => exportLead("csv"));
 els.stopAudioBtn.addEventListener("click", stopAudio);
 els.callBtn.addEventListener("click", placeCall);
 els.callNumber.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); placeCall(); } });
+els.callNumberCustom.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); placeCall(); } });
 
 els.toggleModeBtn.addEventListener("click", () => {
   state.tapMode = !state.tapMode;
@@ -504,3 +546,4 @@ document.addEventListener("keyup", (e) => {
 
 loadConfig();
 refreshStatus();
+initCallPicker();

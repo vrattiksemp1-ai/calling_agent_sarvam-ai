@@ -29,7 +29,8 @@
       </div>
 
       <div class="call-bar" aria-label="Phone call">
-        <input id="call-number" type="tel" placeholder="Your phone number, e.g. +919876543210" aria-label="Phone number" />
+        <select id="call-number" class="call-select" aria-label="Verified phone numbers"></select>
+        <input id="call-number-custom" type="tel" placeholder="Destination number, e.g. +919876543210" aria-label="Phone number" style="display:none" />
         <button id="call-btn" class="btn btn-call">Call my phone</button>
         <span id="call-status" class="call-status" role="status"></span>
       </div>

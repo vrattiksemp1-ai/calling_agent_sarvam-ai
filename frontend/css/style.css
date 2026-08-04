@@ -75,7 +75,8 @@ html, body {
 .btn-call { background: var(--accent-2); border-color: var(--accent-2); color: #160d00; }
 
 .call-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
-.call-bar input {
+.call-bar input,
+.call-bar select {
   flex: 1; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
   background: var(--panel-2); color: var(--text); font-size: .9rem; min-width: 0;
 }
