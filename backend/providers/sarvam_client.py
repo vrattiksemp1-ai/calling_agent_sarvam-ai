@@ -1,8 +1,9 @@
 """Sarvam cloud provider client (STT + TTS).
 
 Endpoints (verified against https://docs.sarvam.ai):
-  POST https://api.sarvam.ai/speech-to-text     STT (model saaras:v3, multipart)
-  POST https://api.sarvam.ai/text-to-speech     TTS (model bulbul:v3, base64 WAV)
+  POST https://api.sarvam.ai/speech-to-text      STT (model saaras:v3, multipart)
+  POST https://api.sarvam.ai/text-to-speech      TTS (model bulbul:v3, base64 WAV)
+  POST https://api.sarvam.ai/text-to-speech/stream  TTS streaming (WAV chunks)
   GET  https://api.sarvam.ai/                   health/reachability probe
 
 Authentication: the `api-subscription-key` header is required for every call.
@@ -13,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
+from collections.abc import AsyncIterator
 
 import httpx
 
@@ -150,6 +152,50 @@ class SarvamClient:
                 "Text-to-speech failed. Check SARVAM_API_KEY and the Sarvam service status.",
                 details=str(exc.details or exc.message)[:500],
             )
+        except TtsError:
+            raise
+        except Exception as exc:
+            raise TtsError(
+                "Text-to-speech failed. The reply is shown as text instead.",
+                details=str(exc)[:500],
+            )
+
+    async def stream_synthesize(
+        self, text: str, detected_language: str | None = None
+    ) -> AsyncIterator[bytes]:
+        """Stream TTS audio from the /text-to-speech/stream endpoint.
+
+        Yields WAV bytes as soon as chunks arrive, so the first audio can be
+        handed to the caller before synthesis finishes. The request is a single
+        HTTP POST; the response body is the audio stream itself. Raises
+        TtsError if the request fails before any audio arrives.
+        """
+        target_language = tts_language_code_for(
+            detected_language, self._settings.sarvam_tts_language_code
+        )
+        body = {
+            "text": text,
+            "language_code": target_language,
+            "speaker": self._settings.sarvam_tts_speaker,
+            "model": self._settings.sarvam_tts_model,
+            "output_audio_codec": "wav",
+            "speech_sample_rate": 24000,
+            "temperature": 0.6,
+        }
+        url = f"{self._settings.sarvam_base_url.rstrip('/')}/text-to-speech/stream"
+        try:
+            async with self._http.stream(
+                "POST", url, json=body, headers=self._headers
+            ) as resp:
+                if resp.status_code >= 400:
+                    detail = (await resp.aread())[:500]
+                    raise TtsError(
+                        "Text-to-speech failed. Check SARVAM_API_KEY and the Sarvam service status.",
+                        details=detail.decode("utf-8", "replace")[:500],
+                    )
+                async for chunk in resp.aiter_bytes():
+                    if chunk:
+                        yield chunk
         except TtsError:
             raise
         except Exception as exc:

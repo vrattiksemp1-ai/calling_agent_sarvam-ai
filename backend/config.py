@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     sarvam_tts_model: str = "bulbul:v3"
     sarvam_tts_speaker: str = "shubh"
     sarvam_tts_language_code: str = "hi-IN"
+    # When true, use Sarvam's /text-to-speech/stream endpoint so Twilio <Play>
+    # starts before the whole reply is synthesized. Set to false to fall back to
+    # the buffered /text-to-speech endpoint (Sarvam 30-free-units model or API
+    # keys without streaming access).
+    sarvam_tts_streaming: bool = True
     sarvam_request_timeout: float = 120.0
 
     llm_provider: str = "sarvam"

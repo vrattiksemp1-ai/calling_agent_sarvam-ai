@@ -6,7 +6,7 @@
   DELETE /api/calls/{sid}        Hang up an in-progress call
   GET/POST /api/calls/twiml      TwiML served to Twilio (stream or turn loop)
   GET/POST /api/calls/turn       <Gather input="speech"> transcript webhook
-  GET    /api/calls/audio/{id}   Hosted TTS audio for <Play>
+  GET    /api/calls/audio/{id}   Hosted TTS audio for <Play> (file or live stream)
   POST   /api/calls/stream-status Twilio Media Streams lifecycle callback
   POST   /api/calls/status       Twilio status callback (signature-validated)
   WS     /api/calls/stream       Twilio Media Streams audio endpoint
@@ -14,14 +14,17 @@
 
 from __future__ import annotations
 
+import asyncio
+from typing import AsyncIterator
+
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.config import Settings
 from backend.telephony.call_manager import CallRecord, CallRegistry, CallSession
 from backend.telephony.phone import InvalidPhoneNumberError, normalize_e164
-from backend.telephony.turn_flow import TurnFlow
+from backend.telephony.turn_flow import TurnFlow, TtsStream
 from backend.telephony.twilio_service import TwilioService
 from backend.utils.logging import get_logger
 
@@ -155,9 +158,47 @@ async def turn_callback(request: Request) -> Response:
     return Response(content=content, media_type="text/xml")
 
 
+async def _tts_stream_iterator(
+    stream: TtsStream, turn_flow: TurnFlow, token: str
+) -> AsyncIterator[bytes]:
+    """Drain a live TTS stream into the HTTP response as chunks arrive."""
+    empty_reads = 0
+    try:
+        while True:
+            if stream.done.is_set() and stream.queue.empty():
+                break
+            try:
+                chunk = await asyncio.wait_for(stream.queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                if stream.error is not None:
+                    break
+                empty_reads += 1
+                if empty_reads > 15:
+                    break
+                continue
+            empty_reads = 0
+            yield chunk
+    finally:
+        turn_flow.drop_tts_stream(token)
+
+
 @router.get("/audio/{file_id}")
-def get_tts_audio(request: Request, file_id: str) -> FileResponse:
-    """Serve a hosted TTS WAV so Twilio <Play> can fetch the agent's voice."""
+async def get_tts_audio(request: Request, file_id: str) -> Response:
+    """Serve hosted TTS WAV so Twilio <Play> can fetch the agent's voice.
+
+    Streaming TTS replies are served live from the in-memory chunk queue so
+    playback can start before synthesis completes; the buffered file path is
+    kept for the non-streaming fallback.
+    """
+    turn_flow: TurnFlow = request.app.state.turn_flow
+    stream = turn_flow.get_tts_stream(file_id)
+    if stream is not None:
+        if stream.error is not None:
+            raise stream.error
+        return StreamingResponse(
+            _tts_stream_iterator(stream, turn_flow, file_id),
+            media_type=stream.audio_type,
+        )
     settings: Settings = request.app.state.settings
     path = settings.resolved_temp_dir / "tts" / f"{file_id}.wav"
     if not path.is_file():

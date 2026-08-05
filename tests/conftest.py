@@ -116,6 +116,10 @@ def _wav_bytes() -> bytes:
 def sarvam_handler(request: httpx.Request) -> httpx.Response:
     if request.url.path.endswith("/speech-to-text"):
         return httpx.Response(200, json={"transcript": "hello this is a test utterance"})
+    if request.url.path.endswith("/text-to-speech/stream"):
+        return httpx.Response(
+            200, content=_wav_bytes(), headers={"content-type": "audio/wav"}
+        )
     if request.url.path.endswith("/text-to-speech"):
         return httpx.Response(
             200, json={"audios": [base64.b64encode(_wav_bytes()).decode("ascii")]}

@@ -19,9 +19,11 @@ accounts that have upgraded.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import time
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from backend.config import Settings
@@ -47,6 +49,11 @@ TTS_DIR_NAME = "tts"
 MAX_HOSTED_FILES = 50
 HOSTED_FILE_TTL_SECONDS = 2 * 3600
 
+# Streaming TTS: how long we wait for the first audio chunk before falling back
+# to the buffered endpoint, and how long a finished stream stays consumable.
+TTS_FIRST_CHUNK_TIMEOUT_SECONDS = 3.0
+TTS_STREAM_TTL_SECONDS = 120
+
 # default_language -> <Gather language> attribute for Twilio Speech Recognition
 GATHER_LANGUAGES = {
     "en": "en-IN",
@@ -64,6 +71,21 @@ def _gather_language(default_language: str) -> str:
 
 def _escape(text: str) -> str:
     return html.escape(text, quote=True)
+
+
+@dataclass
+class TtsStream:
+    """In-memory buffer for one streaming TTS synthesis.
+
+    The background TTS task pushes raw audio chunks into ``queue`` while the
+    /api/calls/audio/{token} endpoint drains them for Twilio <Play>.
+    """
+
+    audio_type: str = "audio/wav"
+    queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
+    done: asyncio.Event = field(default_factory=asyncio.Event)
+    error: Exception | None = None
 
 
 class TurnFlow:
@@ -84,6 +106,7 @@ class TurnFlow:
         self._sarvam = sarvam
         self._twilio = twilio
         self._registry = registry
+        self._tts_streams: dict[str, TtsStream] = {}
 
     # ---------- TwiML builders ----------
 
@@ -177,6 +200,76 @@ class TurnFlow:
         path.write_bytes(audio)
         return self._twilio.audio_url(file_id), tts_ms
 
+    async def _stream_tts(
+        self, text: str, detected_language: str | None
+    ) -> tuple[str | None, int]:
+        """Start streaming TTS and return a public <Play> URL for it.
+
+        Returns once the first audio chunk has arrived (so the /audio route can
+        already serve data), then the stream keeps filling in the background.
+        Returns (None, 0) when streaming is disabled or produces no audio in
+        time, so callers can fall back to the buffered file path.
+        """
+        if not self._settings.sarvam_tts_streaming:
+            return await self._host_tts(text, detected_language)
+        token = uuid.uuid4().hex
+        stream = TtsStream()
+        self._tts_streams[token] = stream
+        task = asyncio.create_task(
+            self._run_tts_stream(token, stream, text, detected_language)
+        )
+        ready_task = asyncio.create_task(stream.ready.wait())
+        done_task = asyncio.create_task(stream.done.wait())
+        started = time.monotonic()
+        try:
+            await asyncio.wait_for(
+                asyncio.wait(
+                    {ready_task, done_task}, return_when=asyncio.FIRST_COMPLETED
+                ),
+                timeout=TTS_FIRST_CHUNK_TIMEOUT_SECONDS,
+            )
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            task.cancel()
+            self._tts_streams.pop(token, None)
+            logger.warning("Streaming TTS produced no audio in time; using buffered TTS.")
+            return await self._host_tts(text, detected_language)
+        finally:
+            ready_task.cancel()
+            done_task.cancel()
+        if not stream.ready.is_set():
+            task.cancel()
+            self._tts_streams.pop(token, None)
+            return await self._host_tts(text, detected_language)
+        first_chunk_ms = int((time.monotonic() - started) * 1000)
+        return self._twilio.audio_url(token), first_chunk_ms
+
+    async def _run_tts_stream(
+        self,
+        token: str,
+        stream: TtsStream,
+        text: str,
+        detected_language: str | None,
+    ) -> None:
+        """Background task: pull Sarvam chunks into the in-memory stream queue."""
+        try:
+            async for chunk in self._sarvam.stream_synthesize(text, detected_language):
+                stream.queue.put_nowait(chunk)
+                stream.ready.set()
+        except AppError as exc:
+            logger.warning("Streaming TTS failed: %s", exc.code)
+            stream.error = exc
+        finally:
+            stream.done.set()
+            asyncio.get_running_loop().call_later(
+                TTS_STREAM_TTL_SECONDS, self.drop_tts_stream, token
+            )
+
+    def get_tts_stream(self, token: str) -> TtsStream | None:
+        return self._tts_streams.get(token)
+
+    def drop_tts_stream(self, token: str) -> None:
+        self._tts_streams.pop(token, None)
+
     # ---------- entry points ----------
 
     async def greeting_twiml(self) -> str:
@@ -195,7 +288,7 @@ class TurnFlow:
                 text = greeting.strip()
         except AppError:
             logger.warning("Dynamic greeting generation failed; using fallback.")
-        url, _ = await self._host_tts(text, lang)
+        url, _ = await self._stream_tts(text, lang)
         return self._gather_twiml(url, text if url is None else None)
 
     async def process_webhook(self, call_sid: str, speech_result: str) -> str:
@@ -239,7 +332,7 @@ class TurnFlow:
             completed = session.status == "completed"
 
             if not completed:
-                reply_url, tts_ms = await self._host_tts(reply, detected_language)
+                reply_url, tts_ms = await self._stream_tts(reply, detected_language)
                 if reply_url:
                     timings.tts_attempted = True
                     timings.tts_latency_ms = tts_ms
@@ -262,7 +355,7 @@ class TurnFlow:
                         db.add(last_assistant)
 
         if completed:
-            final_url, _ = await self._host_tts(reply, detected_language) if reply else (None, 0)
+            final_url, _ = await self._stream_tts(reply, detected_language) if reply else (None, 0)
             goodbye_url, _ = await self._host_tts(GOODBYE, detected_language)
             return self._final_twiml(
                 final_url, goodbye_url, reply, GOODBYE
