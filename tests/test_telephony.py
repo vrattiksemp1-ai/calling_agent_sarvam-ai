@@ -274,7 +274,7 @@ def test_twilio_service_turn_url_includes_token():
     service = TwilioService(settings, client=FakeTwilioClient())
     assert service.turn_url() == (
         "https://abc.ngrok-free.app/api/calls/turn?turn_token=secret123"
-        + "#ct=10000&rt=15000&tt=15000&rc=3&rp=ct,rt,5xx"
+        + "#ct=10000&rt=15000&tt=15000&rc=3&rp=ct,5xx"
     )
 
 
@@ -289,7 +289,7 @@ def test_twilio_service_turn_url_without_token_when_unconfigured():
     service = TwilioService(settings, client=FakeTwilioClient())
     assert service.turn_url() == (
         "https://abc.ngrok-free.app/api/calls/turn"
-        + "#ct=10000&rt=15000&tt=15000&rc=3&rp=ct,rt,5xx"
+        + "#ct=10000&rt=15000&tt=15000&rc=3&rp=ct,5xx"
     )
 
 
@@ -545,7 +545,7 @@ def test_turn_twiml_action_url_contains_token(tmp_path):
     client = _turn_app(tmp_path)
     resp = client.post("/api/calls/twiml")
     assert resp.status_code == 200
-    assert 'action="https://x.ngrok-free.app/api/calls/turn?turn_token=turn-secret-123#ct=10000&amp;rt=15000&amp;tt=15000&amp;rc=3&amp;rp=ct,rt,5xx"' in resp.text
+    assert 'action="https://x.ngrok-free.app/api/calls/turn?turn_token=turn-secret-123#ct=10000&amp;rt=15000&amp;tt=15000&amp;rc=3&amp;rp=ct,5xx"' in resp.text
 
 
 def test_turn_webhook_empty_speech_reprompts(client):

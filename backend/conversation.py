@@ -123,6 +123,35 @@ class ConversationEngine:
             )
         return parsed
 
+    async def generate_greeting(self, timings) -> tuple[str, int, dict]:
+        """Produce the opening line via the LLM before any caller input.
+
+        Previously the call opened with the same hard-coded GREETING verbatim on
+        every call. This generates a natural, varied opening using the same
+        system prompt (state = "greeting", no history). Returns
+        (greeting_text, latency_ms, usage).
+        """
+        async def producer(repair: bool) -> str:
+            messages = prompts.build_messages(
+                [], {}, [], "greeting", repair=repair,
+            )
+            raw, latency, usage = await self._llm.generate(messages)
+            timings.llm_latency_ms = latency
+            timings.llm_usage = usage
+            return raw
+
+        parsed, error = await parse_with_repair(producer)
+        if parsed is None:
+            raise LlmStructuredOutputError(
+                "The assistant could not produce a structured greeting.",
+                details=error,
+            )
+        return (
+            parsed.assistant_message or "",
+            timings.llm_latency_ms or 0,
+            timings.llm_usage or {},
+        )
+
     async def process_turn(
         self,
         db: OrmSession,
