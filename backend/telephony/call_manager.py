@@ -37,6 +37,35 @@ GREETING = (
 REPEAT_MESSAGE = "I'm sorry, I didn't catch that. Could you say that again?"
 GOODBYE = "Thank you for your time. Your details are saved and this call is ending. Goodbye!"
 
+# Language-aware fallbacks used when LLM generation or streaming fails.
+FALLBACK_MESSAGES = {
+    "greeting": {
+        "en": GREETING,
+        "hi": "नमस्ते! मैं आपकी मदद के लिए यहाँ हूँ. शुरू करने के लिए, क्या मैं आपका नाम पूछ सकता हूँ?",
+        "gu": "નમસ્તે! હું તમારી મદદ માટે અહીં છું. શરૂ કરવા માટે, તમારું નામ પૂછી શકું?",
+    },
+    "repeat": {
+        "en": REPEAT_MESSAGE,
+        "hi": "माफ़ कीजिए, मैं समझ नहीं पाया. क्या आप दोबारा कह सकते हैं?",
+        "gu": "માફ કરશો, હું સમજી શક્યો નહીં. શું તમે ફરીથી કહી શકશો?",
+    },
+    "goodbye": {
+        "en": GOODBYE,
+        "hi": "समय देने के लिए धन्यवाद. आपकी जानकारी सुरक्षित हो गई है. यह कॉल समाप्त हो रही है. नमस्ते!",
+        "gu": "સમય આપવા બદલ આભાર. તમારી વિગતો સાચવી લીધી છે. આ કૉલ સમાપ્ત થાય છે. આવજો!",
+    },
+}
+
+
+def fallback_text(name: str, language: str | None) -> str:
+    """Pick the fallback message for a language code (gu/hi -> localized)."""
+    lang = (language or "en").strip().lower()
+    if lang in {"gu", "gu-in", "gujarati"}:
+        return FALLBACK_MESSAGES[name]["gu"]
+    if lang in {"hi", "hi-in", "hinglish"}:
+        return FALLBACK_MESSAGES[name]["hi"]
+    return FALLBACK_MESSAGES[name]["en"]
+
 # VAD tuning (all in 20 ms mu-law chunks = 160 samples each)
 SPEECH_ENERGY = 500
 MIN_UTTERANCE_CHUNKS = 8
@@ -174,7 +203,7 @@ class CallSession:
             transcript, stt_ms = await self._sarvam.transcribe(str(tmp), duration_ms)
         except AppError as exc:
             logger.warning("Call STT failed: %s", exc.code)
-            await self._speak(REPEAT_MESSAGE)
+            await self._speak(fallback_text("repeat", self._settings.default_language))
             return
         finally:
             tmp.unlink(missing_ok=True)
@@ -194,8 +223,9 @@ class CallSession:
                 return
             _, parsed = await self._engine.process_turn(db, session, transcript, timings)
             reply = parsed.assistant_message
+            detected_language = session.language or self._settings.default_language
             timings.response_char_count = len(reply)
-            if session.status != "abandoned":
+            if reply:
                 try:
                     tts_bytes, _, tts_ms = await self._sarvam.synthesize(
                         reply, parsed.detected_language
@@ -223,14 +253,19 @@ class CallSession:
                 )
                 db.add(last_assistant)
             completed = session.status == "completed"
+            abandoned = session.status == "abandoned"
 
         if tts_bytes:
             await self._stream_wav(tts_bytes)
-        elif reply:
-            await self._speak(REPEAT_MESSAGE)
+        elif reply and not abandoned:
+            await self._speak(fallback_text("repeat", detected_language))
 
         if completed:
-            await self._speak(GOODBYE)
+            await self._speak(fallback_text("goodbye", detected_language))
+            self._completed = True
+        elif abandoned:
+            if not tts_bytes:
+                await self._speak(fallback_text("goodbye", detected_language))
             self._completed = True
 
     # ---------- VAD ----------
@@ -318,7 +353,9 @@ class CallSession:
                     if self._call_sid:
                         self._registry.update(self._call_sid, status="in-progress")
                     self._busy = True
-                    await self._speak(GREETING)
+                    await self._speak(
+                        fallback_text("greeting", self._settings.default_language)
+                    )
                     self._busy = False
                 elif event == "media":
                     media = message.get("media") or {}

@@ -132,8 +132,9 @@ class SarvamClient:
                 "speaker": self._settings.sarvam_tts_speaker,
                 "model": self._settings.sarvam_tts_model,
                 "output_audio_codec": "wav",
-                "speech_sample_rate": "24000",
-                "temperature": 0.6,
+                "speech_sample_rate": str(self._settings.sarvam_tts_speech_sample_rate),
+                "temperature": self._settings.sarvam_tts_temperature,
+                "pace": self._settings.sarvam_tts_pace,
             }
             resp = await self._request_with_retry(
                 "POST",
@@ -179,8 +180,9 @@ class SarvamClient:
             "speaker": self._settings.sarvam_tts_speaker,
             "model": self._settings.sarvam_tts_model,
             "output_audio_codec": "wav",
-            "speech_sample_rate": 24000,
-            "temperature": 0.6,
+            "speech_sample_rate": self._settings.sarvam_tts_speech_sample_rate,
+            "temperature": self._settings.sarvam_tts_temperature,
+            "pace": self._settings.sarvam_tts_pace,
         }
         url = f"{self._settings.sarvam_base_url.rstrip('/')}/text-to-speech/stream"
         try:

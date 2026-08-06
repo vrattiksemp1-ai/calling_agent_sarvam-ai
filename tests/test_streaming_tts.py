@@ -100,7 +100,7 @@ async def test_stream_synthesize_sends_integer_sample_rate(tmp_path):
     client = make_mock_sarvam_client(settings, handler)
     async for _ in client.stream_synthesize("hello"):
         pass
-    assert captured["json"]["speech_sample_rate"] == 24000
+    assert captured["json"]["speech_sample_rate"] == 8000
     assert isinstance(captured["json"]["speech_sample_rate"], int)
 
 

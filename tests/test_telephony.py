@@ -36,6 +36,7 @@ from conftest import (
     make_mock_twilio_client,
     make_settings,
     sarvam_handler,
+    structured_json,
 )
 
 SAMPLE_RATE = 8000
@@ -456,6 +457,31 @@ def test_twiml_endpoint(client):
     assert "<Stream" not in resp.text
 
 
+def test_twiml_endpoint_gather_language_gujarati(tmp_path):
+    settings = make_settings(
+        tmp_path,
+        default_language="gu",
+        sarvam_api_key="x",
+        llm_api_key="x",
+        twilio_account_sid="AC123",
+        twilio_auth_token="tok",
+        twilio_phone_number="+15005550006",
+        public_base_url="https://x.ngrok-free.app",
+        twilio_trial_mode=True,
+    )
+    app = build_app(
+        settings,
+        sarvam_client=make_mock_sarvam_client(settings, sarvam_handler),
+        llm_client=make_mock_llm_client(settings, lead_llm_handler),
+        twilio_client=make_mock_twilio_client(settings),
+    )
+    with TestClient(app) as c:
+        resp = c.post("/api/calls/twiml")
+        assert resp.status_code == 200
+        assert 'language="gu-IN"' in resp.text
+        assert "<Play>" in resp.text
+
+
 def test_twiml_endpoint_streaming_when_not_trial(tmp_path):
     settings = make_settings(
         tmp_path,
@@ -588,6 +614,76 @@ def test_turn_audio_endpoint_serves_wav(client):
     assert audio.status_code == 200
     assert audio.headers["content-type"].startswith("audio/wav")
     assert audio.content[:4] == b"RIFF"
+
+
+def _custom_turn_app(tmp_path, llm_handler, default_language="en"):
+    settings = make_settings(
+        tmp_path,
+        sarvam_api_key="x",
+        llm_api_key="x",
+        twilio_account_sid="AC123",
+        twilio_auth_token="tok",
+        twilio_phone_number="+15005550006",
+        public_base_url="https://x.ngrok-free.app",
+        twilio_test_phone_number="+917048211715",
+        twilio_turn_webhook_secret="turn-secret-123",
+        default_language=default_language,
+    )
+    app = build_app(
+        settings,
+        sarvam_client=make_mock_sarvam_client(settings, sarvam_handler),
+        llm_client=make_mock_llm_client(settings, llm_handler),
+        twilio_client=make_mock_twilio_client(settings),
+    )
+    return TestClient(app)
+
+
+def _token_turn_post(client, speech, call_sid="CA-hangup-1"):
+    return client.post(
+        "/api/calls/turn?turn_token=turn-secret-123",
+        data={"CallSid": call_sid, "SpeechResult": speech},
+    )
+
+
+def test_turn_webhook_hangup_intent_hangs_up(tmp_path):
+    def handler(request):
+        return structured_json(
+            "Theek che, aavjo! Bye.",
+            detected_language="gu",
+            extracted_fields={},
+            next_state="abandoned",
+        )
+
+    client = _custom_turn_app(tmp_path, handler)
+    resp = _token_turn_post(client, "hang up the call", call_sid="CA-hangup-1")
+    assert resp.status_code == 200
+    assert "<Hangup/>" in resp.text
+    assert "<Gather" not in resp.text
+    assert "<Play>" in resp.text
+
+    status = client.get("/api/calls/CA-hangup-1").json()
+    assert status["session_id"]
+    lead = client.get(f"/api/sessions/{status['session_id']}/lead").json()
+    assert lead["conversation_status"] == "abandoned"
+
+
+def test_turn_webhook_gather_language_follows_session(tmp_path):
+    def handler(request):
+        return structured_json(
+            "Kem chho? Tamaru naam shu chhe?",
+            detected_language="gu",
+            extracted_fields={},
+            next_state="collecting_identity",
+        )
+
+    # default is English, but the caller speaks Gujarati -> next <Gather> must
+    # switch to gu-IN so Twilio STT follows the user's language dynamically.
+    client = _custom_turn_app(tmp_path, handler, default_language="en")
+    resp = _token_turn_post(client, "kem cho", call_sid="CA-lang-1")
+    assert resp.status_code == 200
+    assert 'language="gu-IN"' in resp.text
+    assert "<Gather" in resp.text
+    assert "<Hangup" not in resp.text
 
 
 def _signed_status_post(client, sid, status, token="token-test"):

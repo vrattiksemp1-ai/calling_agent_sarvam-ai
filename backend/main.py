@@ -71,7 +71,11 @@ def build_app(
     app.state.session_factory = session_factory or factory
     app.state.sarvam_client = sarvam_client or SarvamClient(settings)
     app.state.llm_client = llm_client or LlmClient(settings)
-    app.state.conversation_engine = ConversationEngine(app.state.llm_client)
+    app.state.conversation_engine = ConversationEngine(
+        app.state.llm_client,
+        business_name=settings.business_name,
+        business_description=settings.business_description,
+    )
     app.state.rate_limiter = RateLimiter(
         enabled=settings.rate_limit_enabled,
         per_minute=settings.rate_limit_per_minute,

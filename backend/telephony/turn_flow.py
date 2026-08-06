@@ -34,11 +34,9 @@ from backend.metrics import TurnTimings
 from backend.models import Message, Session
 from backend.providers.sarvam_client import SarvamClient
 from backend.telephony.call_manager import (
-    GREETING,
-    GOODBYE,
-    REPEAT_MESSAGE,
     CallRecord,
     CallRegistry,
+    fallback_text,
 )
 from backend.telephony.twilio_service import TwilioService
 from backend.utils.logging import get_logger
@@ -61,6 +59,9 @@ GATHER_LANGUAGES = {
     "hi": "hi-IN",
     "hi-in": "hi-IN",
     "hinglish": "hi-IN",
+    "gu": "gu-IN",
+    "gu-in": "gu-IN",
+    "gujarati": "gu-IN",
 }
 
 
@@ -110,15 +111,18 @@ class TurnFlow:
 
     # ---------- TwiML builders ----------
 
-    def _gather_attrs(self, turn_url: str) -> str:
-        lang = _gather_language(self._settings.default_language)
+    def _gather_attrs(self, turn_url: str, language: str | None = None) -> str:
+        lang = _gather_language(language or self._settings.default_language)
         return (
             'input="speech" action="{url}" method="POST" speechTimeout="auto" '
             'timeout="4" language="{lang}" actionOnEmptyResult="true"'
         ).format(url=_escape(turn_url), lang=lang)
 
     def _gather_twiml(
-        self, prompt_url: str | None, prompt_text: str | None = None
+        self,
+        prompt_url: str | None,
+        prompt_text: str | None = None,
+        language: str | None = None,
     ) -> str:
         """TwiML that plays the agent prompt (or says it) and listens for speech."""
         turn_url = self._twilio.turn_url()
@@ -130,7 +134,24 @@ class TurnFlow:
             inner = ""
         return (
             '<?xml version="1.0" encoding="UTF-8"?>'
-            f'<Response><Gather {self._gather_attrs(turn_url)}>{inner}</Gather></Response>'
+            f'<Response><Gather {self._gather_attrs(turn_url, language)}>{inner}</Gather></Response>'
+        )
+
+    def _farewell_twiml(
+        self,
+        reply_url: str | None,
+        reply_text: str,
+    ) -> str:
+        """TwiML that plays a short goodbye and hangs up (caller ended the call)."""
+        parts: list[str] = []
+        if reply_url:
+            parts.append(f"<Play>{_escape(reply_url)}</Play>")
+        elif reply_text:
+            parts.append(f"<Say>{_escape(reply_text)}</Say>")
+        parts.append("<Hangup/>")
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            f"<Response>{''.join(parts)}</Response>"
         )
 
     def _final_twiml(
@@ -281,15 +302,15 @@ class TurnFlow:
         """
         lang = self._settings.default_language
         timings = TurnTimings(settings=self._settings)
-        text = GREETING
+        text = fallback_text("greeting", lang)
         try:
-            greeting, _, _ = await self._engine.generate_greeting(timings)
+            greeting, _, _ = await self._engine.generate_greeting(timings, language=lang)
             if greeting and greeting.strip():
                 text = greeting.strip()
         except AppError:
             logger.warning("Dynamic greeting generation failed; using fallback.")
         url, _ = await self._stream_tts(text, lang)
-        return self._gather_twiml(url, text if url is None else None)
+        return self._gather_twiml(url, text if url is None else None, language=lang)
 
     async def process_webhook(self, call_sid: str, speech_result: str) -> str:
         """One <Gather> turn: process the transcript and return the next TwiML."""
@@ -317,9 +338,12 @@ class TurnFlow:
             detected_language = session.language or self._settings.default_language
 
             if not text:
-                prompt_url, _ = await self._host_tts(REPEAT_MESSAGE, detected_language)
+                repeat = fallback_text("repeat", detected_language)
+                prompt_url, _ = await self._host_tts(repeat, detected_language)
                 return self._gather_twiml(
-                    prompt_url, REPEAT_MESSAGE if prompt_url is None else None
+                    prompt_url,
+                    repeat if prompt_url is None else None,
+                    language=detected_language,
                 )
 
             timings = TurnTimings(settings=self._settings)
@@ -330,8 +354,9 @@ class TurnFlow:
             if getattr(parsed, "detected_language", None):
                 detected_language = parsed.detected_language
             completed = session.status == "completed"
+            abandoned = session.status == "abandoned"
 
-            if not completed:
+            if not completed and not abandoned:
                 reply_url, tts_ms = await self._stream_tts(reply, detected_language)
                 if reply_url:
                     timings.tts_attempted = True
@@ -356,9 +381,17 @@ class TurnFlow:
 
         if completed:
             final_url, _ = await self._stream_tts(reply, detected_language) if reply else (None, 0)
-            goodbye_url, _ = await self._host_tts(GOODBYE, detected_language)
+            goodbye = fallback_text("goodbye", detected_language)
+            goodbye_url, _ = await self._host_tts(goodbye, detected_language)
             return self._final_twiml(
-                final_url, goodbye_url, reply, GOODBYE
+                final_url, goodbye_url, reply, goodbye
             )
 
-        return self._gather_twiml(reply_url, reply if reply_url is None else None)
+        if abandoned:
+            farewell = reply or fallback_text("goodbye", detected_language)
+            farewell_url, _ = await self._stream_tts(farewell, detected_language)
+            return self._farewell_twiml(farewell_url, farewell)
+
+        return self._gather_twiml(
+            reply_url, reply if reply_url is None else None, language=detected_language
+        )

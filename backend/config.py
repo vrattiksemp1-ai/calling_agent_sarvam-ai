@@ -18,7 +18,7 @@ SARVAM_TTS_LANGUAGES = {
     "od-IN", "pa-IN", "ta-IN", "te-IN",
 }
 
-# Maps detected_language (en, hi, en-hi, ...) to a valid TTS target code.
+# Maps detected_language (en, hi, gu, en-hi, ...) to a valid TTS target code.
 DETECTED_TO_TTS_LANGUAGE = {
     "en": "en-IN",
     "en-in": "en-IN",
@@ -29,6 +29,9 @@ DETECTED_TO_TTS_LANGUAGE = {
     "en-hi": "hi-IN",
     "hi-en": "hi-IN",
     "hinglish": "hi-IN",
+    "gu": "gu-IN",
+    "gu-in": "gu-IN",
+    "gujarati": "gu-IN",
 }
 
 
@@ -60,6 +63,14 @@ class Settings(BaseSettings):
     sarvam_tts_model: str = "bulbul:v3"
     sarvam_tts_speaker: str = "shubh"
     sarvam_tts_language_code: str = "hi-IN"
+    # Bulbul v3 expressiveness/speed. Higher temperature = more expressive,
+    # human-feeling prosody; pace 0.5-2.0 (1.0 is natural).
+    sarvam_tts_temperature: float = 1.0
+    sarvam_tts_pace: float = 0.95
+    # Output sample rate for Sarvam TTS. 8000 Hz is best for Twilio telephony
+    # (avoids Twilio's lower-quality resampling of full-band audio); higher
+    # rates (24000/48000) only matter for non-phone playback.
+    sarvam_tts_speech_sample_rate: int = 8000
     # When true, use Sarvam's /text-to-speech/stream endpoint so Twilio <Play>
     # starts before the whole reply is synthesized. Set to false to fall back to
     # the buffered /text-to-speech endpoint (Sarvam 30-free-units model or API
@@ -95,6 +106,11 @@ class Settings(BaseSettings):
 
     default_language: str = "en"
     max_audio_mb: int = 15
+
+    # Business identity injected into the agent's system prompt so the opening
+    # and the whole call represent the brand instead of a generic assistant.
+    business_name: str = "Vrattiks"
+    business_description: str = "a technology and software company focused on building AI-powered solutions for businesses and individuals."
 
     retain_audio: bool = False
     rate_limit_enabled: bool = True

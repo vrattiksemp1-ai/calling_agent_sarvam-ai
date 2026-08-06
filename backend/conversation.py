@@ -33,8 +33,15 @@ def utcnow() -> datetime:
 
 
 class ConversationEngine:
-    def __init__(self, llm_client: LlmClient):
+    def __init__(
+        self,
+        llm_client: LlmClient,
+        business_name: str | None = None,
+        business_description: str | None = None,
+    ):
         self._llm = llm_client
+        self._business_name = business_name
+        self._business_description = business_description
 
     def _lead_fields(self, lead: Lead | None) -> dict[str, str]:
         if lead is None:
@@ -109,6 +116,8 @@ class ConversationEngine:
                 list(session.skipped_fields or []),
                 session.current_state,
                 repair=repair,
+                business_name=self._business_name,
+                business_description=self._business_description,
             )
             raw, latency, usage = await self._llm.generate(messages)
             timings.llm_latency_ms = latency
@@ -123,7 +132,9 @@ class ConversationEngine:
             )
         return parsed
 
-    async def generate_greeting(self, timings) -> tuple[str, int, dict]:
+    async def generate_greeting(
+        self, timings, language: str | None = None
+    ) -> tuple[str, int, dict]:
         """Produce the opening line via the LLM before any caller input.
 
         Previously the call opened with the same hard-coded GREETING verbatim on
@@ -133,7 +144,9 @@ class ConversationEngine:
         """
         async def producer(repair: bool) -> str:
             messages = prompts.build_messages(
-                [], {}, [], "greeting", repair=repair,
+                [], {}, [], "greeting", repair=repair, language=language,
+                business_name=self._business_name,
+                business_description=self._business_description,
             )
             raw, latency, usage = await self._llm.generate(messages)
             timings.llm_latency_ms = latency
@@ -178,6 +191,9 @@ class ConversationEngine:
         history.append({"role": "user", "content": user_text})
 
         parsed = await self._llm_turn(db, session, lead, user_text, history, timings)
+
+        if getattr(parsed, "detected_language", None):
+            session.language = parsed.detected_language
 
         if session.current_state == "greeting":
             session.current_state = "collecting_identity"
@@ -234,6 +250,11 @@ class ConversationEngine:
                     session.status = "completed"
                     lead.conversation_status = "completed"
                     lead.summary_confirmed = True
+
+        if session.current_state == "abandoned":
+            session.status = "abandoned"
+            lead.conversation_status = "abandoned"
+            db.add(lead)
 
         lead.qualification_score = result.score
         lead.qualification_level = result.level

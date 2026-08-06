@@ -82,6 +82,59 @@ async def test_synthesize_maps_detected_language_to_tts_code(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_synthesize_maps_gujarati_to_gu_in(tmp_path):
+    captured = {}
+
+    def handler(request):
+        captured["body"] = json.loads(request.content)
+        wav = _wav_bytes()
+        return httpx.Response(
+            200, json={"audios": [base64.b64encode(wav).decode("ascii")]}
+        )
+
+    client = make_mock_sarvam_client(make_settings(tmp_path), handler)
+    await client.synthesize("kem cho", "gu")
+    assert captured["body"]["target_language_code"] == "gu-IN"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_sends_expressiveness_params(tmp_path):
+    captured = {}
+
+    def handler(request):
+        captured["body"] = json.loads(request.content)
+        wav = _wav_bytes()
+        return httpx.Response(
+            200, json={"audios": [base64.b64encode(wav).decode("ascii")]}
+        )
+
+    settings = make_settings(tmp_path, sarvam_tts_temperature=0.9, sarvam_tts_pace=1.1)
+    client = make_mock_sarvam_client(settings, handler)
+    await client.synthesize("hello")
+    assert captured["body"]["temperature"] == 0.9
+    assert captured["body"]["pace"] == 1.1
+    assert captured["body"]["speech_sample_rate"] == "8000"
+
+
+@pytest.mark.asyncio
+async def test_stream_synthesize_sends_expressiveness_params(tmp_path):
+    captured = {}
+
+    def handler(request):
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, content=_wav_bytes(), headers={"content-type": "audio/wav"}
+        )
+
+    settings = make_settings(tmp_path, sarvam_tts_temperature=0.9, sarvam_tts_pace=1.1)
+    client = make_mock_sarvam_client(settings, handler)
+    chunks = [c async for c in client.stream_synthesize("hello")]
+    assert chunks
+    assert captured["body"]["temperature"] == 0.9
+    assert captured["body"]["pace"] == 1.1
+
+
+@pytest.mark.asyncio
 async def test_synthesize_http_error_becomes_tts_error(tmp_path):
     def handler(request):
         return httpx.Response(500, json={"error": "boom"})

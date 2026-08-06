@@ -1,5 +1,7 @@
 """Dynamic greeting generation tests (ConversationEngine.generate_greeting)."""
 
+import json
+
 import httpx
 import pytest
 
@@ -58,3 +60,105 @@ async def test_generate_greeting_raises_on_non_structured(tmp_path):
     engine = ConversationEngine(make_mock_llm_client(settings, handler))
     with pytest.raises(LlmStructuredOutputError):
         await engine.generate_greeting(TurnTimings(settings=settings))
+
+
+@pytest.mark.asyncio
+async def test_generate_greeting_injects_language_instruction(tmp_path):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return structured_json(
+            "કેમ છો? તમારું નામ શું છે?",
+            extracted_fields={},
+            next_state="collecting_identity",
+        )
+
+    settings = make_settings(tmp_path)
+    engine = ConversationEngine(make_mock_llm_client(settings, handler))
+    text, _, _ = await engine.generate_greeting(
+        TurnTimings(settings=settings), language="gu"
+    )
+    system = next(
+        m["content"]
+        for m in captured["payload"]["messages"]
+        if m["role"] == "system"
+    )
+    assert "Gujarati" in system
+    assert text == "કેમ છો? તમારું નામ શું છે?"
+
+
+@pytest.mark.asyncio
+async def test_generate_greeting_no_language_no_extra_instruction(tmp_path):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return structured_json(
+            "Hello! May I have your name?",
+            extracted_fields={},
+            next_state="collecting_identity",
+        )
+
+    settings = make_settings(tmp_path)
+    engine = ConversationEngine(make_mock_llm_client(settings, handler))
+    await engine.generate_greeting(TurnTimings(settings=settings))
+    system = next(
+        m["content"]
+        for m in captured["payload"]["messages"]
+        if m["role"] == "system"
+    )
+    assert "The caller speaks" not in system
+
+
+@pytest.mark.asyncio
+async def test_generate_greeting_injects_business_identity(tmp_path):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return structured_json(
+            "હાય! હું Vrattiks તરફથી કૉલ કરું છું. તમને શું જોઈએ છે, કહી દો?",
+            extracted_fields={},
+            next_state="collecting_identity",
+        )
+
+    settings = make_settings(tmp_path)
+    engine = ConversationEngine(
+        make_mock_llm_client(settings, handler),
+        business_name="Vrattiks",
+        business_description="a technology and software company",
+    )
+    text, _, _ = await engine.generate_greeting(TurnTimings(settings=settings))
+    system = next(
+        m["content"]
+        for m in captured["payload"]["messages"]
+        if m["role"] == "system"
+    )
+    assert "Vrattiks" in system
+    assert "a technology and software company" in system
+    assert "BUSINESS" in system
+    assert "Vrattiks" in text
+
+
+@pytest.mark.asyncio
+async def test_generate_greeting_without_business_has_no_brand(tmp_path):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return structured_json(
+            "Hello! What can I help you with?",
+            extracted_fields={},
+            next_state="collecting_identity",
+        )
+
+    settings = make_settings(tmp_path)
+    engine = ConversationEngine(make_mock_llm_client(settings, handler))
+    await engine.generate_greeting(TurnTimings(settings=settings))
+    system = next(
+        m["content"]
+        for m in captured["payload"]["messages"]
+        if m["role"] == "system"
+    )
+    assert "BUSINESS" not in system
