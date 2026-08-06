@@ -127,6 +127,7 @@ def test_system_prompt_has_human_language_and_hangup_rules():
     assert "preferred_contact_time" in prompt
     assert "FULL SENTENCE = LANGUAGE SWITCH" in prompt
     assert "English spoken in Devanagari script" in prompt
+    assert "NEVER ask a question and then disconnect in the same turn" in prompt
 
 
 def test_detect_utterance_language_removed_no_hardcoded_lists():
