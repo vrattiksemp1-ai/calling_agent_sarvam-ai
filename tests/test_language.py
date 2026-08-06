@@ -125,3 +125,97 @@ def test_system_prompt_has_human_language_and_hangup_rules():
     assert "everyday spoken Gujarati" in prompt
     assert "decide by INTENT, not by matching words" in prompt
     assert "preferred_contact_time" in prompt
+    assert "FULL SENTENCE = LANGUAGE SWITCH" in prompt
+    assert "English spoken in Devanagari script" in prompt
+
+
+def test_detect_utterance_language_removed_no_hardcoded_lists():
+    import backend.language_utils as lu
+
+    assert hasattr(lu, "map_stt_language_code")
+    assert not hasattr(lu, "detect_utterance_language")
+    assert not hasattr(lu, "GUJARATI_ROMAN_MARKERS")
+    assert not hasattr(lu, "HINDI_ROMAN_MARKERS")
+    assert not hasattr(lu, "ENGLISH_WORDS")
+
+
+@pytest.mark.asyncio
+async def test_process_turn_agent_decides_when_no_stt_language(tmp_path):
+    from backend.database import create_engine_and_session
+
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return structured_json(
+            "Got it, what exactly are you looking for?",
+            detected_language="en",
+            extracted_fields={},
+            next_state="collecting_identity",
+        )
+
+    settings = make_settings(tmp_path)
+    llm = make_mock_llm_client(settings, handler)
+    _, factory = create_engine_and_session(
+        f"sqlite:///{str(tmp_path / 'agent.db').replace(chr(92), '/')}"
+    )
+    with factory() as db:
+        session = Session(language="gu")
+        db.add(session)
+        db.commit()
+    engine = ConversationEngine(llm)
+    with factory() as db:
+        session = db.get(Session, session.id)
+        await engine.process_turn(
+            db, session, "Currently we are using spreadsheets.", TurnTimings()
+        )
+        db.commit()
+    system = next(
+        m["content"]
+        for m in captured["payload"]["messages"]
+        if m["role"] == "system"
+    )
+    assert "The caller speaks" not in system
+    with factory() as db:
+        assert db.get(Session, session.id).language == "en"
+
+
+@pytest.mark.asyncio
+async def test_process_turn_pins_stt_language(tmp_path):
+    from backend.database import create_engine_and_session
+
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return structured_json(
+            "Hello!",
+            detected_language="en",
+            extracted_fields={},
+            next_state="collecting_identity",
+        )
+
+    settings = make_settings(tmp_path)
+    llm = make_mock_llm_client(settings, handler)
+    _, factory = create_engine_and_session(
+        f"sqlite:///{str(tmp_path / 'stt.db').replace(chr(92), '/')}"
+    )
+    with factory() as db:
+        session = Session(language="gu")
+        db.add(session)
+        db.commit()
+    engine = ConversationEngine(llm)
+    with factory() as db:
+        session = db.get(Session, session.id)
+        await engine.process_turn(
+            db, session, "Hello!", TurnTimings(), stt_language="hi"
+        )
+        db.commit()
+    system = next(
+        m["content"]
+        for m in captured["payload"]["messages"]
+        if m["role"] == "system"
+    )
+    assert "The caller speaks Hindi. Reply entirely in Hindi." in system
+    with factory() as db:
+        assert db.get(Session, session.id).language == "hi"

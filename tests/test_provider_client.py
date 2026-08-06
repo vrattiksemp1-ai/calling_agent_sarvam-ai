@@ -31,9 +31,45 @@ async def test_transcribe_success(tmp_path):
 
     settings = make_settings(tmp_path, sarvam_api_key="test-key")
     client = make_mock_sarvam_client(settings, handler)
-    text, latency = await client.transcribe(_write_wav(tmp_path / "a.wav"), 500)
+    text, latency, detected_language = await client.transcribe(
+        _write_wav(tmp_path / "a.wav"), 500
+    )
     assert text == "hello world"
     assert latency >= 0
+    assert detected_language is None
+
+
+@pytest.mark.asyncio
+async def test_transcribe_returns_detected_language_code(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"transcript": "kem cho", "language_code": "gu-IN"},
+        )
+
+    settings = make_settings(tmp_path, sarvam_api_key="test-key")
+    client = make_mock_sarvam_client(settings, handler)
+    text, latency, detected_language = await client.transcribe(
+        _write_wav(tmp_path / "a.wav"), 500
+    )
+    assert text == "kem cho"
+    assert detected_language == "gu"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_ignores_unsupported_language_code(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"transcript": "hello", "language_code": "kn-IN"},
+        )
+
+    settings = make_settings(tmp_path, sarvam_api_key="test-key")
+    client = make_mock_sarvam_client(settings, handler)
+    text, latency, detected_language = await client.transcribe(
+        _write_wav(tmp_path / "a.wav"), 500
+    )
+    assert detected_language is None
 
 
 @pytest.mark.asyncio

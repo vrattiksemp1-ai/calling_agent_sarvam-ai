@@ -20,6 +20,7 @@ import httpx
 
 from backend.config import Settings, tts_language_code_for
 from backend.errors import ProviderUnavailableError, SttError, TtsError
+from backend.language_utils import map_stt_language_code
 from backend.schemas import ProviderStatus
 from backend.utils.logging import get_logger
 
@@ -87,7 +88,9 @@ class SarvamClient:
             details=str(last_error) if last_error else None,
         )
 
-    async def transcribe(self, audio_path, duration_ms: int) -> tuple[str, int]:
+    async def transcribe(
+        self, audio_path, duration_ms: int
+    ) -> tuple[str, int, str | None]:
         started = time.monotonic()
         try:
             with open(audio_path, "rb") as fh:
@@ -109,7 +112,8 @@ class SarvamClient:
                     "Sarvam returned an empty transcript. Try speaking clearly and closer to the microphone."
                 )
             latency_ms = int((time.monotonic() - started) * 1000)
-            return text.strip(), latency_ms
+            detected_language = map_stt_language_code(payload.get("language_code"))
+            return text.strip(), latency_ms, detected_language
         except ProviderUnavailableError:
             raise
         except SttError:

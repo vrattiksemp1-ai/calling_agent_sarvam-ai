@@ -246,11 +246,15 @@ async def process_audio(
             )
             timings.audio_duration_ms = prepared.duration_ms
 
-            transcript, stt_latency = await sarvam.transcribe(prepared.wav_path, prepared.duration_ms)
+            transcript, stt_latency, stt_language = await sarvam.transcribe(
+                prepared.wav_path, prepared.duration_ms
+            )
             timings.stt_latency_ms = stt_latency
             timings.transcript_char_count = len(transcript)
 
-            lead, parsed = await engine.process_turn(db, session, transcript, timings)
+            lead, parsed = await engine.process_turn(
+                db, session, transcript, timings, stt_language=stt_language
+            )
             timings.response_char_count = len(parsed.assistant_message)
 
             audio_base64: str | None = None

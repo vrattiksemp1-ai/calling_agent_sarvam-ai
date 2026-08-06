@@ -35,7 +35,7 @@ async def test_sarvam_retries_transient_error(monkeypatch, tmp_path):
     )
     path = tmp_path / "a.wav"
     path.write_bytes(b"data")
-    text, _ = await client.transcribe(str(path), 500)
+    text, _, _ = await client.transcribe(str(path), 500)
     assert text == "recovered"
     assert len(calls) == 3  # 1 + MAX_RETRIES(2)
 

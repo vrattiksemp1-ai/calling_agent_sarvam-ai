@@ -107,6 +107,7 @@ class ConversationEngine:
         user_text: str,
         history: list[dict],
         timings,
+        language: str | None = None,
     ) -> tuple[str, int, dict, object | None]:
         """Run the LLM and return (raw, latency, usage, parsed-or-None)."""
         async def producer(repair: bool) -> str:
@@ -116,6 +117,7 @@ class ConversationEngine:
                 list(session.skipped_fields or []),
                 session.current_state,
                 repair=repair,
+                language=language,
                 business_name=self._business_name,
                 business_description=self._business_description,
             )
@@ -171,6 +173,7 @@ class ConversationEngine:
         session: Session,
         user_text: str,
         timings,
+        stt_language: str | None = None,
     ) -> tuple[Lead, object]:
         if session.status == "abandoned":
             lead = session.lead
@@ -190,9 +193,18 @@ class ConversationEngine:
         ]
         history.append({"role": "user", "content": user_text})
 
-        parsed = await self._llm_turn(db, session, lead, user_text, history, timings)
+        # On Sarvam-STT paths the STT engine's own auto-detected language pins
+        # the reply language (provider signal, not a hardcoded list). On
+        # Twilio's <Gather> path there is no STT language, so the agent judges
+        # the language itself and its detected_language drives the session.
+        turn_language = stt_language
+        parsed = await self._llm_turn(
+            db, session, lead, user_text, history, timings, language=turn_language
+        )
 
-        if getattr(parsed, "detected_language", None):
+        if turn_language:
+            session.language = turn_language
+        elif getattr(parsed, "detected_language", None):
             session.language = parsed.detected_language
 
         if session.current_state == "greeting":

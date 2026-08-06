@@ -108,7 +108,7 @@ async def test_consent_no_blocks_completion(tmp_path):
     engine, factory, sid = _make_engine_and_session(tmp_path, "consent_no.db")
 
     class BadLlmTurnEngine(BaseEngine):
-        async def _llm_turn(self, db, session, lead, user_text, history, timings):
+        async def _llm_turn(self, db, session, lead, user_text, history, timings, language=None):
             class _Bad:
                 assistant_message = "done"
                 detected_language = "en"

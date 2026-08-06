@@ -200,7 +200,9 @@ class CallSession:
         tmp.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_bytes(wav)
         try:
-            transcript, stt_ms = await self._sarvam.transcribe(str(tmp), duration_ms)
+            transcript, stt_ms, stt_language = await self._sarvam.transcribe(
+                str(tmp), duration_ms
+            )
         except AppError as exc:
             logger.warning("Call STT failed: %s", exc.code)
             await self._speak(fallback_text("repeat", self._settings.default_language))
@@ -221,7 +223,9 @@ class CallSession:
             session = db.get(Session, self._session_id)
             if session is None:
                 return
-            _, parsed = await self._engine.process_turn(db, session, transcript, timings)
+            _, parsed = await self._engine.process_turn(
+                db, session, transcript, timings, stt_language=stt_language
+            )
             reply = parsed.assistant_message
             detected_language = session.language or self._settings.default_language
             timings.response_char_count = len(reply)
