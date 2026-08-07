@@ -1,0 +1,163 @@
+{
+  "schema_version": "1.0",
+  "credential_policy": {
+    "contains_secrets": false,
+    "instruction": "Enter credentials only in provider dashboards or secret stores; never add them to this file."
+  },
+  "provisioning": {
+    "mode": "dashboard_based",
+    "product": "Sarvam Voice Agents",
+    "status": "requires_external_setup",
+    "telephony_target_region": "Mumbai",
+    "model_processing_region": "unverified",
+    "carrier_endpoints": {
+      "twilio": {
+        "cell": "managed+twilio",
+        "dashboard_channel": "Twilio",
+        "webhook": "https://apps.sarvam.ai/api/app-runtime/channels/twilio"
+      },
+      "exotel": {
+        "cell": "managed+exotel",
+        "dashboard_channel": "Exotel Voicebot",
+        "voicebot_endpoint": "https://apps.sarvam.ai/api/app-runtime/channels/exotel",
+        "mumbai_base_url": "https://api.in.exotel.com"
+      }
+    }
+  },
+  "identity": {
+    "business_name": "Vrattiks",
+    "business_description": "a technology and software company focused on building AI-powered solutions for businesses and individuals.",
+    "role": "lead qualification AI voice assistant"
+  },
+  "greeting": {
+    "must_explicitly_identify_ai": true,
+    "must_identify_business": true,
+    "purpose": "understand the caller's need so Vrattiks can help",
+    "maximum_sentences": 2,
+    "fallbacks": {
+      "en": "Hi! I'm an AI assistant calling from Vrattiks to understand what you need. May I ask your name first?",
+      "hi": "नमस्ते! मैं Vrattiks की AI assistant हूँ और आपकी ज़रूरत समझने के लिए कॉल कर रही हूँ. आपका नाम क्या है?",
+      "gu": "હેલો! હું Vrattiksની AI assistant છું અને તમને શું જોઈએ છે એ સમજવા કૉલ કર્યો છે. તમારું નામ શું છે?"
+    }
+  },
+  "prompt_rules": {
+    "one_main_question_per_turn": true,
+    "maximum_response_sentences": 2,
+    "never_claim_human": true,
+    "never_fabricate_fields": true,
+    "confirm_names_and_critical_contact_fields": true,
+    "do_not_repeat_collected_or_refused_fields": true,
+    "clarify_garbled_values_instead_of_guessing": true,
+    "ending_is_intent_based": true,
+    "callback_time_is_saved_when_supplied": true,
+    "summary_requires_confirmation": true,
+    "style_signal_scope": "rolling transcript signal may adjust empathy, wording, and cadence only; it must never affect consent, extraction, qualification, task completion, or consequential actions"
+  },
+  "consent_flow": {
+    "field": "consent_to_contact",
+    "explicit_yes_or_no_required": true,
+    "request_after": [
+      "identity",
+      "contact",
+      "business_requirement"
+    ],
+    "then": "review_summary",
+    "completion_requires": [
+      "affirmative consent",
+      "summary confirmation"
+    ],
+    "negative_consent_blocks_completion": true
+  },
+  "fields": [
+    "full_name",
+    "phone_number",
+    "email",
+    "company_name",
+    "job_title",
+    "city",
+    "country",
+    "preferred_language",
+    "business_type",
+    "product_or_service_interest",
+    "business_requirement",
+    "main_problem",
+    "current_solution",
+    "estimated_budget",
+    "purchase_timeline",
+    "decision_maker_status",
+    "team_size",
+    "preferred_contact_method",
+    "preferred_contact_time",
+    "additional_notes",
+    "consent_to_contact"
+  ],
+  "languages": {
+    "supported": [
+      "Gujarati",
+      "Hindi",
+      "English",
+      "Gujlish",
+      "Hinglish"
+    ],
+    "codes": [
+      "gu-IN",
+      "hi-IN",
+      "en-IN"
+    ],
+    "follow_latest_utterance": true,
+    "switch_within_same_turn": true,
+    "mid_sentence_code_switching": true,
+    "gujlish": "Gujarati with natural light English mixing",
+    "hinglish": "Hindi with natural English mixing"
+  },
+  "voice": {
+    "tts_model": "bulbul:v3",
+    "speaker": "ritu",
+    "temperature": 0.75,
+    "pace": 1.0,
+    "telephony_sample_rate_hz": 8000,
+    "fallback_language": "gu-IN",
+    "native_speaker_review_required": true
+  },
+  "interaction": {
+    "interruptions_enabled": true,
+    "generation_and_playback_cancellable": true,
+    "barge_in_target_ms": 300,
+    "semantic_endpointing": true,
+    "endpoint_silence_ms": {
+      "base": 400,
+      "fast": 320,
+      "slow": 550
+    }
+  },
+  "privacy": {
+    "recording_enabled_by_default": false,
+    "retain_audio": false,
+    "data_minimization": "Store scenario IDs, transcripts/exports where approved, expected entities, telemetry, and ratings; do not store audio by default."
+  },
+  "hooks_and_outputs": {
+    "status_callback": "configure in the selected carrier dashboard; value is deployment-specific and must not contain credentials",
+    "managed_exports": [
+      "call export",
+      "analytics export"
+    ],
+    "application_outputs": [
+      "structured lead fields",
+      "consent status",
+      "summary confirmation",
+      "conversation status",
+      "provider events",
+      "JSON lead export",
+      "CSV lead export"
+    ],
+    "benchmark_import": "python -m backend.benchmarking import-managed"
+  },
+  "derived_from": [
+    "backend/config.py",
+    "backend/models.py",
+    "backend/prompts.py",
+    "backend/telephony/call_manager.py",
+    "backend/telephony/endpointing.py",
+    "backend/metrics.py"
+  ]
+}

@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import AsyncIterator
+from typing import AsyncIterator, Literal
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -24,7 +24,12 @@ from pydantic import BaseModel, Field
 
 from backend.config import Settings
 from backend.telephony.call_manager import CallRecord, CallRegistry, CallSession
+from backend.telephony.exotel_service import ExotelService
 from backend.telephony.phone import InvalidPhoneNumberError, normalize_e164
+from backend.telephony.transport import (
+    ExotelAgentStreamTransport,
+    TwilioMediaStreamTransport,
+)
 from backend.telephony.turn_flow import TurnFlow, TtsStream
 from backend.telephony.twilio_service import TwilioService
 from backend.utils.logging import get_logger
@@ -36,6 +41,10 @@ router = APIRouter(prefix="/api/calls", tags=["calls"])
 
 class PlaceCallRequest(BaseModel):
     to: str = Field(..., description="Destination phone number in E.164 format, e.g. +919876543210")
+    provider: Literal["twilio", "exotel"] | None = Field(
+        default=None,
+        description="Optional carrier override; omitted requests preserve the configured default.",
+    )
 
 
 class CallStatusOut(BaseModel):
@@ -64,6 +73,12 @@ def _twilio(request: Request) -> TwilioService:
     return request.app.state.twilio_client
 
 
+def _call_service(request: Request, provider: str):
+    if provider == "exotel":
+        return request.app.state.exotel_client
+    return request.app.state.twilio_client
+
+
 @router.get("/numbers")
 async def list_verified_numbers(request: Request) -> dict:
     """Destination numbers the caller may choose from (dropdown source).
@@ -81,7 +96,9 @@ async def list_verified_numbers(request: Request) -> dict:
 
 @router.post("", response_model=CallStatusOut)
 async def place_call(request: Request, body: PlaceCallRequest) -> CallStatusOut:
-    twilio = _twilio(request)
+    settings: Settings = request.app.state.settings
+    provider = body.provider or settings.telephony_provider
+    service = _call_service(request, provider)
     registry: CallRegistry = request.app.state.call_registry
     turn_flow: TurnFlow = request.app.state.turn_flow
 
@@ -102,14 +119,15 @@ async def place_call(request: Request, body: PlaceCallRequest) -> CallStatusOut:
             turn_flow._drop_pending(prior.call_sid)
         except Exception:  # noqa: BLE001 - best-effort cleanup
             logger.warning("Failed clearing pending turn for %s", prior.call_sid)
-        await twilio.complete_call(prior.call_sid)
+        await _call_service(request, prior.provider).complete_call(prior.call_sid)
         registry.update(prior.call_sid, status="completed", error="superseded")
 
-    result = await twilio.start_call(to)
+    result = await service.start_call(to)
     record = CallRecord(
         call_sid=result.call_sid,
         to_number=result.to,
         from_number=result.from_,
+        provider=provider,
         status=result.status,
     )
     registry.add(record)
@@ -251,6 +269,7 @@ async def _tts_stream_iterator(
                     break
                 continue
             empty_reads = 0
+            turn_flow.mark_audio_outbound(token)
             yield chunk
     finally:
         turn_flow.drop_tts_stream(token)
@@ -284,6 +303,7 @@ async def get_tts_audio(request: Request, file_id: str) -> Response:
             retryable=False,
             status_code=404,
         )
+    turn_flow.mark_audio_outbound(file_id)
     return FileResponse(path, media_type="audio/wav")
 
 
@@ -305,7 +325,6 @@ def get_call_status(request: Request, call_sid: str) -> CallStatusOut:
 
 @router.delete("/{call_sid}", response_model=CallStatusOut)
 async def hang_up_call(request: Request, call_sid: str) -> CallStatusOut:
-    twilio = _twilio(request)
     registry: CallRegistry = request.app.state.call_registry
     turn_flow: TurnFlow = request.app.state.turn_flow
     record = registry.get(call_sid)
@@ -322,7 +341,7 @@ async def hang_up_call(request: Request, call_sid: str) -> CallStatusOut:
         turn_flow._drop_pending(call_sid)
     except Exception:  # noqa: BLE001
         logger.warning("Failed clearing pending turn for hangup %s", call_sid)
-    await twilio.complete_call(call_sid)
+    await _call_service(request, record.provider).complete_call(call_sid)
     registry.update(call_sid, status="completed")
     return _status_out(record)
 
@@ -372,6 +391,7 @@ async def call_status_callback(request: Request) -> dict:
 @router.websocket("/stream")
 async def call_stream(ws: WebSocket) -> None:
     settings: Settings = ws.app.state.settings
+    transport = TwilioMediaStreamTransport(ws)
     session = CallSession(
         settings=settings,
         session_factory=ws.app.state.session_factory,
@@ -379,7 +399,30 @@ async def call_stream(ws: WebSocket) -> None:
         sarvam=ws.app.state.sarvam_client,
         twilio=ws.app.state.twilio_client,
         registry=ws.app.state.call_registry,
-        ws=ws,
+        transport=transport,
+        call_service=ws.app.state.twilio_client,
+    )
+    try:
+        await session.run()
+    except WebSocketDisconnect:
+        pass
+
+
+@router.websocket("/exotel/stream")
+async def exotel_call_stream(ws: WebSocket) -> None:
+    """Exotel Voicebot/AgentStream bidirectional audio endpoint."""
+
+    settings: Settings = ws.app.state.settings
+    transport = ExotelAgentStreamTransport(ws)
+    session = CallSession(
+        settings=settings,
+        session_factory=ws.app.state.session_factory,
+        engine=ws.app.state.conversation_engine,
+        sarvam=ws.app.state.sarvam_client,
+        twilio=None,
+        registry=ws.app.state.call_registry,
+        transport=transport,
+        call_service=ws.app.state.exotel_client,
     )
     try:
         await session.run()

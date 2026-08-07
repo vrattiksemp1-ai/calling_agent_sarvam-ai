@@ -33,6 +33,7 @@ DETECTED_TO_TTS_LANGUAGE = {
     "gu": "gu-IN",
     "gu-in": "gu-IN",
     "gujarati": "gu-IN",
+    "gujlish": "gu-IN",
 }
 
 
@@ -61,6 +62,21 @@ class Settings(BaseSettings):
     sarvam_stt_model: str = "saaras:v3"
     sarvam_stt_mode: str = "transcribe"
     sarvam_language_code: str = "unknown"
+    # Realtime phone STT is opt-in so browser/file uploads keep the established
+    # REST path. The call session falls back to local VAD + REST STT if the
+    # realtime socket cannot be established.
+    sarvam_realtime_stt_enabled: bool = False
+    sarvam_realtime_stt_url: str = (
+        "wss://api.sarvam.ai/speech-to-text-realtime/ws"
+    )
+    sarvam_realtime_stt_model: str = "saaras:v3-realtime"
+    sarvam_realtime_stt_vad_threshold: float = 0.5
+    sarvam_realtime_stt_silence_ms: int = 400
+    sarvam_realtime_stt_min_speech_ms: int = 100
+    sarvam_semantic_endpointing_enabled: bool = True
+    sarvam_semantic_fast_silence_ms: int = 320
+    sarvam_semantic_slow_silence_ms: int = 550
+    sarvam_realtime_stt_fallback_enabled: bool = True
     sarvam_tts_model: str = "bulbul:v3"
     sarvam_tts_speaker: str = "ritu"
     sarvam_tts_language_code: str = "gu-IN"
@@ -77,6 +93,13 @@ class Settings(BaseSettings):
     # the buffered /text-to-speech endpoint (Sarvam 30-free-units model or API
     # keys without streaming access).
     sarvam_tts_streaming: bool = True
+    # Persistent WebSocket TTS is used only by bidirectional phone transports.
+    # HTTP streaming and buffered synthesis remain available as fallbacks.
+    sarvam_realtime_tts_enabled: bool = False
+    sarvam_realtime_tts_url: str = (
+        "wss://api.sarvam.ai/v1/text-to-speech/stream"
+    )
+    sarvam_realtime_tts_codec: str = "linear16"
     sarvam_request_timeout: float = 120.0
 
     llm_provider: str = "sarvam"
@@ -93,6 +116,10 @@ class Settings(BaseSettings):
     # to disable it; "low"/"medium"/"high" requests that level.
     llm_reasoning_effort: str = ""
     llm_max_tokens: int = 0
+    llm_streaming_enabled: bool = False
+    # Phone calls prioritize time-to-first-token. This override is deliberately
+    # independent of the browser/API reasoning setting.
+    phone_llm_reasoning_effort: str = "none"
 
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
@@ -106,6 +133,18 @@ class Settings(BaseSettings):
     twilio_status_callback_url: str = ""
     twilio_turn_webhook_secret: str = ""
     twilio_call_timeout: float = 60.0
+
+    # Outbound carrier selection. Existing clients omit the provider and keep
+    # using Twilio by default; callers may opt into Exotel per request.
+    telephony_provider: str = "twilio"
+    exotel_base_url: str = "https://api.in.exotel.com"
+    exotel_account_sid: str = ""
+    exotel_api_key: str = ""
+    exotel_api_token: str = ""
+    exotel_caller_id: str = ""
+    exotel_flow_id: str = ""
+    exotel_status_callback_url: str = ""
+    exotel_call_timeout: float = 60.0
 
     default_language: str = "en"
     max_audio_mb: int = 15
@@ -138,6 +177,14 @@ class Settings(BaseSettings):
             return value
         cleaned = value.split("#", 1)[0].strip().strip("\"'")
         return cleaned or "ritu"
+
+    @field_validator("telephony_provider")
+    @classmethod
+    def _validate_telephony_provider(cls, value: str) -> str:
+        provider = (value or "twilio").strip().lower()
+        if provider not in {"twilio", "exotel"}:
+            raise ValueError("TELEPHONY_PROVIDER must be 'twilio' or 'exotel'")
+        return provider
 
     @property
     def resolved_temp_dir(self) -> Path:

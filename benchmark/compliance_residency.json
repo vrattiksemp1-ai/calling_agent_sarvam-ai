@@ -1,0 +1,76 @@
+{
+  "schema_version": "1.0",
+  "instructions": "Complete from signed contracts and current provider documentation. Unknown values must remain exactly 'unverified'. Do not infer residency from an API hostname or sales claim.",
+  "required_fields": [
+    "model_processing_region",
+    "telephony_media_region",
+    "recording_location",
+    "transcript_retention",
+    "recording_retention",
+    "subprocessors",
+    "deletion_sla",
+    "deletion_api",
+    "dpa",
+    "consent",
+    "owner",
+    "sign_off"
+  ],
+  "cells": {
+    "managed+exotel": {
+      "model_processing_region": "unverified",
+      "telephony_media_region": "unverified",
+      "recording_location": "unverified",
+      "transcript_retention": "unverified",
+      "recording_retention": "unverified",
+      "subprocessors": "unverified",
+      "deletion_sla": "unverified",
+      "deletion_api": "unverified",
+      "dpa": "unverified",
+      "consent": "unverified",
+      "owner": "unverified",
+      "sign_off": "unverified"
+    },
+    "managed+twilio": {
+      "model_processing_region": "unverified",
+      "telephony_media_region": "unverified",
+      "recording_location": "unverified",
+      "transcript_retention": "unverified",
+      "recording_retention": "unverified",
+      "subprocessors": "unverified",
+      "deletion_sla": "unverified",
+      "deletion_api": "unverified",
+      "dpa": "unverified",
+      "consent": "unverified",
+      "owner": "unverified",
+      "sign_off": "unverified"
+    },
+    "custom+exotel": {
+      "model_processing_region": "unverified",
+      "telephony_media_region": "unverified",
+      "recording_location": "unverified",
+      "transcript_retention": "unverified",
+      "recording_retention": "unverified",
+      "subprocessors": "unverified",
+      "deletion_sla": "unverified",
+      "deletion_api": "unverified",
+      "dpa": "unverified",
+      "consent": "unverified",
+      "owner": "unverified",
+      "sign_off": "unverified"
+    },
+    "custom+twilio": {
+      "model_processing_region": "unverified",
+      "telephony_media_region": "unverified",
+      "recording_location": "unverified",
+      "transcript_retention": "unverified",
+      "recording_retention": "unverified",
+      "subprocessors": "unverified",
+      "deletion_sla": "unverified",
+      "deletion_api": "unverified",
+      "dpa": "unverified",
+      "consent": "unverified",
+      "owner": "unverified",
+      "sign_off": "unverified"
+    }
+  }
+}

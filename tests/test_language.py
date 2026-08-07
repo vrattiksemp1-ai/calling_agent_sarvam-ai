@@ -71,6 +71,7 @@ async def test_process_turn_keeps_default_language(tmp_path):
 def test_fallback_text_is_language_aware():
     assert "હેલો" in fallback_text("greeting", "gu")
     assert "હેલો" in fallback_text("greeting", "gu-in")
+    assert "AI assistant" in fallback_text("greeting", "gujlish")
     assert "माफ़" in fallback_text("repeat", "hi")
     assert "thank" in fallback_text("goodbye", "en").lower()
     assert "I'm sorry" in fallback_text("repeat", None)

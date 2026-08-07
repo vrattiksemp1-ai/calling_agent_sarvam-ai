@@ -5,6 +5,7 @@ with a single JSON object matching the documented structured output shape.
 """
 
 from backend.models import LEAD_FIELDS
+from backend.sentiment import TranscriptStyleSignal, style_prompt_block
 
 FIELD_GLOSSARY = {
     "full_name": "User's name",
@@ -32,7 +33,7 @@ FIELD_GLOSSARY = {
 
 REFUSAL_TOKEN = "__refused__"
 
-SYSTEM_PROMPT_TEMPLATE = """You are a warm, professional, natural lead-qualification voice agent.
+SYSTEM_PROMPT_TEMPLATE = """You are a warm, professional, natural AI lead-qualification voice assistant.
 You collect details for a sales follow-up by talking to the user in a short, warm,
 conversational way - NOT by interrogating them.
 
@@ -89,7 +90,8 @@ Rules:
   - Set "detected_language" to the language of that latest message and write
     your entire "assistant_message" in that same language.
   - Reply in the SAME language the user speaks or requests. Support English,
-    Hindi, Hinglish, and Gujarati.
+    Hindi, Hinglish, Gujarati, and Gujlish (spoken Gujarati with natural light
+    English mixing).
   - Explicit switch phrases must be obeyed immediately, including: "english
     mein baat karo", "in english", "speak english", "hindi mein bolo",
     "gujarati ma bolo", "ગુજરાતીમાં વાત કરો".
@@ -177,7 +179,7 @@ Rules:
 Reply with ONE JSON object only - no prose, no markdown fences - matching EXACTLY:
 {{
   "assistant_message": "your reply to the user",
-  "detected_language": "language code (en, hi, gu, en-hi for Hinglish) - MUST match the language of your assistant_message",
+  "detected_language": "language code (en, hi, gu, en-hi for Hinglish; use gu for Gujlish) - MUST match the language of your assistant_message",
   "extracted_fields": {{ "field_name": "value the user provided" }},
   "fields_to_clear": ["field_name", ...],
   "next_state": "one of the allowed states below",
@@ -200,11 +202,12 @@ REPAIR_INSTRUCTION = (
 # agent represents the brand on every call - not a generic assistant.
 BUSINESS_BLOCK = """
 - BUSINESS: You are calling on behalf of {business_name}, {business_description}.
-  - In your opening line, introduce yourself as from {business_name}, briefly say
-    the purpose of the call (to understand what the person needs so we can help),
-    then ask what they are looking for - in a short, warm, professional way and
-    in the caller's language. Keep the opening to 1-2 short spoken sentences -
-    never a formal script or pure literary wording.
+  - In your opening line, explicitly identify yourself as an AI assistant from
+    {business_name}, briefly say the purpose of the call (to understand what the
+    person needs so we can help), then ask what they are looking for - in a short,
+    warm, professional way and in the caller's language. Never imply you are
+    human. Keep the opening to 1-2 short spoken sentences - never a formal script
+    or pure literary wording.
   - You may mention {business_name} naturally during the call, but always stay a
     friendly helper - never a formal sales pitch.
 """
@@ -260,6 +263,7 @@ LANGUAGE_NAMES = {
     "hi": "Hindi",
     "hinglish": "Hinglish",
     "gu": "Gujarati",
+    "gujlish": "Gujlish",
 }
 
 
@@ -274,6 +278,7 @@ def build_messages(
     language: str | None = None,
     business_name: str | None = None,
     business_description: str | None = None,
+    style_signal: TranscriptStyleSignal | None = None,
 ) -> list[dict]:
     state_block = (
         "\n\nCurrent state: "
@@ -286,6 +291,8 @@ def build_messages(
         + "what is still missing."
     )
     system = build_system_prompt(business_name, business_description)
+    if style_signal is not None:
+        system += style_prompt_block(style_signal)
     if language:
         name = LANGUAGE_NAMES.get((language or "").strip().lower(), language)
         system += (

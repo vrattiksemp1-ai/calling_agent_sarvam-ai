@@ -28,6 +28,11 @@ os.environ["TWILIO_TEST_PHONE_NUMBER"] = ""
 os.environ["TWILIO_VERIFIED_NUMBERS"] = ""
 os.environ["PUBLIC_BASE_URL"] = ""
 os.environ["TWILIO_CALL_PUBLIC_BASE_URL"] = ""
+os.environ["TELEPHONY_PROVIDER"] = "twilio"
+os.environ["EXOTEL_ACCOUNT_SID"] = ""
+os.environ["EXOTEL_API_KEY"] = ""
+os.environ["EXOTEL_API_TOKEN"] = ""
+os.environ["EXOTEL_CALLER_ID"] = ""
 
 from backend.config import Settings
 from backend.main import build_app
@@ -44,7 +49,7 @@ def make_settings(tmp_path, **overrides) -> Settings:
         "debug": False,
     }
     base.update(overrides)
-    return Settings(**base)
+    return Settings(_env_file=None, **base)
 
 
 def make_mock_llm_client(settings, handler):

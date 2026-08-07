@@ -78,3 +78,15 @@ async def test_json_mode_still_requested(tmp_path):
     client = make_mock_llm_client(settings, _capture(captured))
     await client.generate([{"role": "user", "content": "hi"}])
     assert captured["body"]["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_phone_reasoning_override_disables_reasoning(tmp_path):
+    captured = {}
+    settings = make_settings(tmp_path, llm_reasoning_effort="high")
+    client = make_mock_llm_client(settings, _capture(captured))
+    await client.generate(
+        [{"role": "user", "content": "hi"}],
+        reasoning_effort=settings.phone_llm_reasoning_effort,
+    )
+    assert captured["body"]["reasoning_effort"] is None

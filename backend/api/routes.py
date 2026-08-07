@@ -138,8 +138,8 @@ async def create_session(request: Request):
     settings: Settings = request.app.state.settings
     sarvam: SarvamClient = request.app.state.sarvam_client
     greeting = (
-        "Hi there! I'm the lead qualification assistant. To get you the "
-        "right information quickly, may I ask your name first?"
+        f"Hi! I'm an AI assistant from {settings.business_name}, calling to "
+        "understand what you need. May I ask your name first?"
     )
     audio_base64: str | None = None
     audio_mime: str | None = None

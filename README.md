@@ -71,8 +71,8 @@ flowchart LR
 ### Features
 
 - Voice + text conversation modes; push-to-talk and tap-to-talk
-- **Outbound phone calls** via Twilio Media Streams with live barge-in, a
-  verified-number dropdown, trial-mode allow-listing, and signed webhooks
+- **Outbound phone calls** via Twilio bidirectional Media Streams or Exotel
+  AgentStream, with paced playback and live generation/playback barge-in
 - English / Hindi / Hinglish detection and replies (TTS language auto-maps)
 - 21-field structured lead capture with per-field change history
 - Explicit **consent** gate (`consent_to_contact`) before the summary is shown;
@@ -143,12 +143,18 @@ All settings come from environment variables or a local `.env` file. See
 | `SARVAM_BASE_URL` | `https://api.sarvam.ai` | Sarvam cloud API |
 | `SARVAM_API_KEY` | *(empty)* | Required; sent as `api-subscription-key` |
 | `SARVAM_STT_MODEL` | `saaras:v3` | STT model |
+| `SARVAM_REALTIME_STT_ENABLED` | `false` | Use persistent Saaras realtime STT for bidirectional calls |
+| `SARVAM_REALTIME_STT_SILENCE_MS` | `400` | Base server endpointing silence |
+| `SARVAM_SEMANTIC_ENDPOINTING_ENABLED` | `true` | Adjust VAD silence from partial transcript completeness |
 | `SARVAM_TTS_MODEL` | `bulbul:v3` | TTS model |
-| `SARVAM_TTS_SPEAKER` | `shubh` | TTS voice |
-| `SARVAM_TTS_LANGUAGE_CODE` | `hi-IN` | Fallback TTS target language |
+| `SARVAM_TTS_SPEAKER` | `ritu` | TTS voice |
+| `SARVAM_TTS_LANGUAGE_CODE` | `gu-IN` | Fallback TTS target language |
+| `SARVAM_REALTIME_TTS_ENABLED` | `false` | Stream phone audio over persistent Bulbul WebSocket TTS |
 | `LLM_PROVIDER` | `sarvam` | `sarvam` (chat API) or `openai-compatible` |
 | `LLM_BASE_URL` | `https://api.sarvam.ai` | LLM endpoint |
 | `LLM_MODEL` | `sarvam-105b` | LLM model name |
+| `LLM_STREAMING_ENABLED` | `false` | Stream the structured phone response to TTS |
+| `PHONE_LLM_REASONING_EFFORT` | `none` | Disable hidden reasoning on latency-sensitive phone turns |
 | `MAX_AUDIO_MB` | `15` | Max upload size |
 | `RETAIN_AUDIO` | `false` | Keep normalized WAVs in `storage/tmp/retained` |
 | `DATABASE_URL` | `sqlite:///./data/sarvam_leads.db` | SQLite location |
@@ -164,6 +170,13 @@ All settings come from environment variables or a local `.env` file. See
 | `TWILIO_VERIFIED_NUMBERS` | *(empty)* | Comma-separated extra verified fallback numbers |
 | `TWILIO_TRIAL_MODE` | `true` | Restrict calls to Twilio-verified numbers |
 | `TWILIO_STATUS_CALLBACK_URL` | *(empty)* | Status webhook URL (derived from `PUBLIC_BASE_URL` if empty) |
+| `TELEPHONY_PROVIDER` | `twilio` | Default outbound carrier (`twilio` or `exotel`) |
+| `EXOTEL_BASE_URL` | `https://api.in.exotel.com` | Exotel Mumbai Connect Voice AI API |
+| `EXOTEL_ACCOUNT_SID` | *(empty)* | Exotel account SID |
+| `EXOTEL_API_KEY` | *(empty)* | Exotel API key (server-side only) |
+| `EXOTEL_API_TOKEN` | *(empty)* | Exotel API token (server-side only) |
+| `EXOTEL_CALLER_ID` | *(empty)* | Exophone shown as caller ID |
+| `EXOTEL_FLOW_ID` | *(empty)* | Existing app with a bidirectional Voicebot applet; optional |
 | `CALL_RATE_LIMIT_PER_MINUTE` | `5` | Stricter limit for `POST /api/calls` |
 
 > Backwards-compatible aliases: `TWILIO_FROM_NUMBER` (= `TWILIO_PHONE_NUMBER`)
@@ -192,21 +205,23 @@ All settings come from environment variables or a local `.env` file. See
 | `GET` | `/api/leads/{id}/export.csv` | CSV export |
 | `DELETE` | `/api/leads/{id}` | Delete a lead |
 
-### Outbound phone calls (Twilio)
+### Outbound phone calls (Twilio or Exotel)
 
-The web UI can place a real outbound call to a **verified destination number**
-and the lead-qualification agent talks over the call via Twilio Media Streams,
-with **live barge-in** (the agent stops mid-sentence if the caller interrupts).
+The existing web UI and API continue to use Twilio by default. A request can
+select Exotel with `{"to": "+91...", "provider": "exotel"}`, or deployments can
+set `TELEPHONY_PROVIDER=exotel`. Both carriers use the same concurrent call
+session and support **live barge-in** while generation or playback is active.
 
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/api/calls/numbers` | Verified destination numbers (populates the UI dropdown) |
-| `POST` | `/api/calls` | Place a call `{"to": "+91..."}` (E.164 + trial allow-list check) |
+| `POST` | `/api/calls` | Place a call `{"to": "+91...", "provider": "twilio"|"exotel"}`; provider is optional |
 | `GET` | `/api/calls/{sid}` | Call status |
 | `DELETE` | `/api/calls/{sid}` | Hang up |
 | `POST` | `/api/calls/twiml` | TwiML served to Twilio (opens the Media Stream WebSocket) |
 | `POST` | `/api/calls/status` | Status callback webhook (Twilio signature-validated) |
 | `WS` | `/api/calls/stream` | Twilio Media Streams two-way audio |
+| `WS` | `/api/calls/exotel/stream` | Exotel AgentStream two-way raw PCM/PCMU audio |
 
 Setup (trial account):
 
@@ -221,10 +236,27 @@ Setup (trial account):
 4. Restart and open the UI: choose a verified number from the dropdown and press
    **Call my phone**.
 
+Exotel Connect Voice AI (Mumbai):
+
+1. Set `EXOTEL_ACCOUNT_SID`, `EXOTEL_API_KEY`, `EXOTEL_API_TOKEN`, and
+   `EXOTEL_CALLER_ID` in `.env`.
+2. Set the account's API cluster (`https://api.in.exotel.com` for Mumbai or
+   `https://api.exotel.com` for Singapore).
+3. For an existing Exotel app, set `EXOTEL_FLOW_ID` and configure its Voicebot
+   applet to connect to `wss://<public-host>/api/calls/exotel/stream`. Leave the
+   flow ID empty only when the account supports direct Connect Voice AI.
+4. Select Exotel per request or set `TELEPHONY_PROVIDER=exotel`.
+
+For either paid bidirectional carrier, enable the custom realtime benchmark
+cell with `SARVAM_REALTIME_STT_ENABLED=true`,
+`SARVAM_REALTIME_TTS_ENABLED=true`, and `LLM_STREAMING_ENABLED=true`. The
+buffered REST/local-VAD path remains the fallback if a realtime socket cannot
+be established.
+
 Security notes:
 
-- Credentials live only in the backend `.env`; they are never sent to the
-  browser and never logged. The Twilio SDK errors are mapped to safe messages.
+- Carrier credentials live only in the backend `.env`; they are never sent to
+  the browser or logged. Provider errors are mapped to safe messages.
 - `POST /api/calls/status` rejects any webhook whose
   `X-Twilio-Signature` cannot be verified with `TWILIO_AUTH_TOKEN`.
 - Trial mode (`TWILIO_TRIAL_MODE=true`) blocks calls to anything not in the
@@ -285,6 +317,22 @@ known **and** the user has explicitly consented to being contacted.
 
 ---
 
+## Managed pilot and four-cell benchmark
+
+The credential-free managed Sarvam Voice Agents spec, compliance/residency
+worksheet, 25-scenario multilingual corpus, safe runner, import formats, exact
+acceptance gates, and external setup steps are in
+[`benchmark/README.md`](benchmark/README.md). Keep `RETAIN_AUDIO=false`; the
+runner never places calls or creates fake results.
+
+```powershell
+python -m backend.benchmarking validate
+python -m backend.benchmarking prepare --run-dir storage\benchmarks\pilot-001 --run-id pilot-001 --calls-per-cell 25
+python -m backend.benchmarking report --run-dir storage\benchmarks\pilot-001
+```
+
+---
+
 ## Testing
 
 All tests run fully mocked - no Sarvam key, LLM, or internet.
@@ -340,8 +388,8 @@ SQLite file and `storage/` are mounted as volumes so data persists.
 **English**
 
 ```
-agent> Hi there! I'm the lead qualification assistant. To get you the right
-       information quickly, may I ask your name first?
+agent> Hi! I'm an AI assistant calling from Vrattiks to understand what you
+       need. May I ask your name first?
 user>  My name is Rahul Sharma
 agent> Thanks Rahul! What is the best phone number or email to reach you?
 user>  9876543210
@@ -357,7 +405,7 @@ agent> Confirmed! Your lead has been saved. Thank you!
 **Hindi**
 
 ```
-agent> नमस्ते! मैं लीड क्वालिफिकेशन असिस्टेंट हूँ। पहले आपका नाम बता सकते हैं?
+agent> नमस्ते! मैं Vrattiks की AI assistant हूँ। पहले आपका नाम बता सकते हैं?
 user>  मेरा नाम राहुल शर्मा है
 agent> धन्यवाद राहुल! आपका फ़ोन नंबर या ईमेल क्या है?
 ...
@@ -366,7 +414,7 @@ agent> धन्यवाद राहुल! आपका फ़ोन नं�
 **Hinglish**
 
 ```
-agent> Hi! Main aapka lead qualification assistant hoon. Pehle aap apna naam bata sakte ho?
+agent> Hi! Main Vrattiks ki AI assistant hoon. Pehle aap apna naam bata sakte ho?
 user>  haan main rahul hoon
 agent> Thanks Rahul! Aapka phone number ya email kya hai?
 ...

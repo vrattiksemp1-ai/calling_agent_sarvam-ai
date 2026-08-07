@@ -27,7 +27,8 @@ async def test_generate_greeting_returns_llm_text(tmp_path):
     settings = make_settings(tmp_path)
     engine = ConversationEngine(make_mock_llm_client(settings, _greeting_handler()))
     text, latency, usage = await engine.generate_greeting(TurnTimings(settings=settings))
-    assert text == "Hi there! Lovely day. May I have your name?"
+    assert text.startswith("I'm an AI assistant")
+    assert text.endswith("Hi there! Lovely day. May I have your name?")
     assert latency >= 0
     assert isinstance(usage, dict)
 
@@ -85,7 +86,8 @@ async def test_generate_greeting_injects_language_instruction(tmp_path):
         if m["role"] == "system"
     )
     assert "Gujarati" in system
-    assert text == "કેમ છો? તમારું નામ શું છે?"
+    assert "AI assistant" in text
+    assert text.endswith("કેમ છો? તમારું નામ શું છે?")
 
 
 @pytest.mark.asyncio

@@ -6,12 +6,17 @@ wording and field extraction; the backend controls everything structural.
 """
 
 from datetime import datetime, timezone
+from collections.abc import Awaitable, Callable
 
 from sqlalchemy.orm import Session as OrmSession
 
 from backend import prompts, scoring, state_machine, validation
 from backend.errors import LlmStructuredOutputError
-from backend.llm_parsing import SAFE_FALLBACK_MESSAGE, parse_with_repair
+from backend.llm_parsing import (
+    SAFE_FALLBACK_MESSAGE,
+    parse_structured_response,
+    parse_with_repair,
+)
 from backend.models import (
     LEAD_FIELDS,
     Lead,
@@ -24,9 +29,12 @@ from backend.language_utils import (
     infer_script_language,
     resolve_turn_language,
 )
+from backend.metrics import persist_turn_telemetry
 from backend.prompts import REFUSAL_TOKEN
 from backend.providers.llm_client import LlmClient
 from backend.schemas import LeadOut
+from backend.sentiment import rolling_transcript_style
+from backend.streaming_json import AssistantMessageStreamParser
 from backend.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -51,6 +59,22 @@ class ConversationEngine:
         if lead is None:
             return {}
         return {name: (getattr(lead, name) or "") for name in LEAD_FIELDS}
+
+    def _ensure_ai_greeting(self, text: str, language: str | None) -> str:
+        """Guarantee disclosure even when a provider ignores the prompt."""
+        if not text:
+            return ""
+        if "ai assistant" in (text or "").casefold():
+            return text
+        business = self._business_name or "the company"
+        lang = (language or "en").strip().lower()
+        if lang.startswith("gu"):
+            prefix = f"હું {business}ની AI assistant છું; "
+        elif lang.startswith("hi") or lang == "hinglish":
+            prefix = f"मैं {business} की AI assistant हूँ; "
+        else:
+            prefix = f"I'm an AI assistant from {business}; "
+        return prefix + (text or "").lstrip()
 
     @staticmethod
     def _reply_language_mismatch(reply: str, expected: str) -> bool:
@@ -125,9 +149,67 @@ class ConversationEngine:
         history: list[dict],
         timings,
         language: str | None = None,
+        on_assistant_chunk: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[str, int, dict, object | None]:
         """Run the LLM and return (raw, latency, usage, parsed-or-None)."""
+        style_signal = rolling_transcript_style(history)
+        if on_assistant_chunk is not None:
+            timings.llm_attempt_count += 1
+            messages = prompts.build_messages(
+                history,
+                self._lead_fields(lead),
+                list(session.skipped_fields or []),
+                session.current_state,
+                repair=False,
+                language=language,
+                business_name=self._business_name,
+                business_description=self._business_description,
+                style_signal=style_signal,
+            )
+            parser = AssistantMessageStreamParser()
+            raw_parts: list[str] = []
+            completion_ms = 0
+            usage: dict = {}
+            try:
+                async for event in self._llm.stream_generate(
+                    messages,
+                    max_tokens=self._llm._settings.llm_max_tokens or 220,
+                    max_retries=0,
+                    reasoning_effort=self._llm._settings.phone_llm_reasoning_effort,
+                ):
+                    if event.type == "delta":
+                        raw_parts.append(event.delta)
+                        if "llm_first_token" not in timings.phase_elapsed_ms:
+                            timings.mark("llm_first_token")
+                        audible = parser.feed(event.delta)
+                        if audible:
+                            await on_assistant_chunk(audible)
+                    elif event.type == "done":
+                        completion_ms = event.completion_latency_ms or 0
+                        usage = event.usage
+                parser.finish()
+            except (ValueError, TypeError) as exc:
+                raise LlmStructuredOutputError(
+                    "The streamed assistant response was incomplete.",
+                    details=str(exc)[:300],
+                ) from exc
+            raw = "".join(raw_parts)
+            parsed = parse_structured_response(raw)
+            timings.llm_latency_ms = completion_ms
+            timings.llm_usage = usage
+            timings.mark("llm_completed")
+            if parsed is None:
+                # Speech may already be audible. Retrying here would speak a
+                # second answer, so fail the turn without applying any state.
+                raise LlmStructuredOutputError(
+                    "The streamed assistant response was not valid structured JSON."
+                )
+            return parsed
+
         async def producer(repair: bool) -> str:
+            if repair:
+                timings.repair_count += 1
+            timings.llm_attempt_count += 1
             messages = prompts.build_messages(
                 history,
                 self._lead_fields(lead),
@@ -137,18 +219,30 @@ class ConversationEngine:
                 language=language,
                 business_name=self._business_name,
                 business_description=self._business_description,
+                style_signal=style_signal,
             )
             # Phone turns need one fast shot: no provider retries, short replies.
             raw, latency, usage = await self._llm.generate(
                 messages,
                 max_tokens=self._llm._settings.llm_max_tokens or 220,
                 max_retries=0,
+                reasoning_effort=(
+                    self._llm._settings.phone_llm_reasoning_effort
+                    if getattr(timings, "transport", "api") != "api"
+                    else None
+                ),
             )
-            timings.llm_latency_ms = latency
+            timings.retry_count += max(
+                0, getattr(self._llm, "last_attempt_count", 1) - 1
+            )
+            # A structured-output repair is a second provider call. Summing both
+            # calls avoids reporting only the faster final attempt.
+            timings.llm_latency_ms += latency
             timings.llm_usage = usage
             return raw
 
         parsed, error = await parse_with_repair(producer)
+        timings.mark("llm_completed")
         if parsed is None:
             raise LlmStructuredOutputError(
                 "The assistant could not produce a structured reply.",
@@ -167,24 +261,34 @@ class ConversationEngine:
         (greeting_text, latency_ms, usage).
         """
         async def producer(repair: bool) -> str:
+            if repair:
+                timings.repair_count += 1
+            timings.llm_attempt_count += 1
             messages = prompts.build_messages(
                 [], {}, [], "greeting", repair=repair, language=language,
                 business_name=self._business_name,
                 business_description=self._business_description,
             )
-            raw, latency, usage = await self._llm.generate(messages)
-            timings.llm_latency_ms = latency
+            raw, latency, usage = await self._llm.generate(
+                messages,
+                reasoning_effort=self._llm._settings.phone_llm_reasoning_effort,
+            )
+            timings.retry_count += max(
+                0, getattr(self._llm, "last_attempt_count", 1) - 1
+            )
+            timings.llm_latency_ms += latency
             timings.llm_usage = usage
             return raw
 
         parsed, error = await parse_with_repair(producer)
+        timings.mark("llm_completed")
         if parsed is None:
             raise LlmStructuredOutputError(
                 "The assistant could not produce a structured greeting.",
                 details=error,
             )
         return (
-            parsed.assistant_message or "",
+            self._ensure_ai_greeting(parsed.assistant_message or "", language),
             timings.llm_latency_ms or 0,
             timings.llm_usage or {},
         )
@@ -196,7 +300,9 @@ class ConversationEngine:
         user_text: str,
         timings,
         stt_language: str | None = None,
+        on_assistant_chunk: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[Lead, object]:
+        timings.stt_language = stt_language
         if session.status == "abandoned":
             lead = session.lead
             return lead, self._abandoned_response(session, lead)
@@ -223,8 +329,14 @@ class ConversationEngine:
             prior_language=prior_language,
             stt_language=stt_language,
         )
+        timings.language_expected = turn_language or prior_language
+        llm_kwargs = {"language": turn_language}
+        # Avoid changing the invocation shape for existing subclasses and test
+        # doubles that override the established buffered _llm_turn signature.
+        if on_assistant_chunk is not None:
+            llm_kwargs["on_assistant_chunk"] = on_assistant_chunk
         parsed = await self._llm_turn(
-            db, session, lead, user_text, history, timings, language=turn_language
+            db, session, lead, user_text, history, timings, **llm_kwargs
         )
 
         # Prefer the hard pin when present. Otherwise trust the model, then the
@@ -233,6 +345,8 @@ class ConversationEngine:
             getattr(parsed, "detected_language", None) or ""
         ).strip().lower() or None
         reply_script = infer_script_language(parsed.assistant_message or "")
+        timings.language_detected = model_detected
+        timings.reply_script = reply_script
         if turn_language in {"gu", "hi", "en"}:
             session.language = turn_language
             parsed.detected_language = turn_language
@@ -253,12 +367,14 @@ class ConversationEngine:
         if turn_language in {"gu", "hi"} and self._reply_language_mismatch(
             parsed.assistant_message or "", turn_language
         ):
+            timings.language_mismatch = True
             if model_detected in {"en", "en-hi"}:
                 logger.info(
                     "Indic-script ASR with English reply; switching session to en"
                 )
                 session.language = "en"
                 parsed.detected_language = "en"
+                timings.language_repair = "model_language_switch"
             else:
                 logger.warning(
                     "LLM reply language mismatched pin=%s; using fast fallback",
@@ -269,6 +385,8 @@ class ConversationEngine:
                 parsed.assistant_message = fallback_text("repeat", turn_language)
                 parsed.detected_language = turn_language
                 session.language = turn_language
+                timings.language_repair = "localized_repeat_fallback"
+                timings.fallback_count += 1
 
         # Soft anti-repeat: if the model pasted the previous assistant line,
         # force a short clarification instead of playing the same audio again.
@@ -362,6 +480,10 @@ class ConversationEngine:
         self._record_provider_event(
             db, session.id, "llm", "ok", timings.llm_latency_ms or 0
         )
+        timings.language_detected = (
+            getattr(parsed, "detected_language", None) or session.language or None
+        )
+        persist_turn_telemetry(db, session.id, timings)
 
         db.add(
             Message(

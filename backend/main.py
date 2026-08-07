@@ -20,6 +20,7 @@ from backend.providers.llm_client import LlmClient
 from backend.providers.sarvam_client import SarvamClient
 from backend.rate_limit import RateLimiter
 from backend.telephony.call_manager import CallRegistry
+from backend.telephony.exotel_service import ExotelService
 from backend.telephony.turn_flow import TurnFlow
 from backend.telephony.twilio_service import TwilioService
 from backend.utils.logging import setup_logging
@@ -36,6 +37,7 @@ def build_app(
     sarvam_client: SarvamClient | None = None,
     llm_client: LlmClient | None = None,
     twilio_client: TwilioService | None = None,
+    exotel_client: ExotelService | None = None,
     call_registry: CallRegistry | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
@@ -55,7 +57,12 @@ def build_app(
                 task.cancel()
             if startup_tasks:
                 await asyncio.gather(*startup_tasks, return_exceptions=True)
-            for client_name in ("sarvam_client", "llm_client", "twilio_client"):
+            for client_name in (
+                "sarvam_client",
+                "llm_client",
+                "twilio_client",
+                "exotel_client",
+            ):
                 client = getattr(app.state, client_name, None)
                 if client is not None and hasattr(client, "aclose"):
                     await client.aclose()
@@ -97,6 +104,7 @@ def build_app(
         per_minute=settings.call_rate_limit_per_minute,
     )
     app.state.twilio_client = twilio_client or TwilioService(settings)
+    app.state.exotel_client = exotel_client or ExotelService(settings)
     app.state.call_registry = call_registry or CallRegistry()
     app.state.turn_flow = TurnFlow(
         settings=settings,

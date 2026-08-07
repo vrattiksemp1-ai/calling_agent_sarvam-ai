@@ -233,8 +233,10 @@ def test_twilio_service_twiml_contains_stream_url():
     service = TwilioService(settings, client=FakeTwilioClient())
     twiml = service.stream_twiml()
     assert "wss://abc.ngrok-free.app/api/calls/stream" in twiml
-    assert "<Start>" in twiml
-    assert "<Pause" in twiml
+    assert "<Connect>" in twiml
+    assert "</Stream></Connect>" in twiml
+    assert "<Start>" not in twiml
+    assert "<Pause" not in twiml
 
 
 def test_twilio_service_signature_validation():
@@ -420,6 +422,8 @@ def _drain_until_mark(ws):
     while True:
         msg = ws.receive_json()
         if msg["event"] == "mark":
+            # Providers return this event after buffered playback completes.
+            ws.send_json(msg)
             return media
         assert msg["event"] == "media"
         media += 1
@@ -640,6 +644,8 @@ def test_twiml_endpoint_streaming_when_not_trial(tmp_path):
         resp = c.post("/api/calls/twiml")
         assert resp.status_code == 200
         assert "<Stream" in resp.text
+        assert "<Connect>" in resp.text
+        assert "<Start>" not in resp.text
         assert "wss://x.ngrok-free.app/api/calls/stream" in resp.text
 
 
@@ -719,7 +725,7 @@ def test_turn_webhook_empty_speech_silent_relisten(client):
     assert "<Say>" not in resp.text
     assert "<Play>" not in resp.text
     assert "<Hangup" not in resp.text
-    assert 'timeout="5"' in resp.text
+    assert 'timeout="6"' in resp.text
     assert "api/calls/turn" in resp.text
 
 

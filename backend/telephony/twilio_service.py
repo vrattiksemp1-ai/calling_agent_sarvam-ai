@@ -210,19 +210,20 @@ class TwilioService:
     # ---------- TwiML ----------
 
     def stream_twiml(self) -> str:
-        """TwiML that opens a Media Stream to the live agent and keeps the call
-        alive. <Start> forks media asynchronously and <Pause> holds the call open
-        so a slow/failing stream connection does not drop the caller instantly
-        (unlike <Connect>, which fails the whole call when the socket is slow).
-        statusCallback posts stream-started/stream-stopped/stream-error events
-        (with StreamError details) to our own endpoint for diagnostics."""
+        """TwiML for a true bidirectional Media Stream.
+
+        ``<Connect><Stream>`` blocks the TwiML call flow while the WebSocket is
+        active and permits server-to-caller ``media``, ``mark`` and ``clear``
+        messages. ``<Start><Stream>`` is receive-only and cannot power the
+        conversational bridge.
+        """
         url = self.stream_ws_url() + "/api/calls/stream"
         status_cb = self.public_base() + "/api/calls/stream-status"
         return (
             '<?xml version="1.0" encoding="UTF-8"?>'
-            "<Response><Start><Stream url=\"{url}\" statusCallback=\"{cb}\">"
+            "<Response><Connect><Stream url=\"{url}\" statusCallback=\"{cb}\">"
             '<Parameter name="role" value="lead-agent"/>'
-            "</Stream></Start><Pause length=\"120\"/></Response>"
+            "</Stream></Connect></Response>"
         ).format(url=url, cb=status_cb)
 
     # ---------- verified numbers ----------
@@ -375,7 +376,12 @@ class TwilioService:
 
         if isinstance(exc, TwilioRestException):
             # Log the technical detail server-side only; never return it.
-            logger.error("Twilio API error: status=%s code=%s", exc.status, exc.code)
+            logger.error(
+                "Twilio API error: status=%s code=%s detail=%s",
+                exc.status,
+                exc.code,
+                safe_exc(exc),
+            )
             if exc.code in (21211, 13223, 13224):
                 return AppError(
                     code="INVALID_PHONE_NUMBER",

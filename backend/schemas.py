@@ -28,6 +28,10 @@ class TurnMetrics(BaseModel):
     llm_latency_ms: int = 0
     tts_latency_ms: int = 0
     total_turn_latency_ms: int = 0
+    caller_perceived_latency_ms: int | None = None
+    phase_durations_ms: dict[str, int] = Field(default_factory=dict)
+    phase_timestamps: dict[str, str] = Field(default_factory=dict)
+    telemetry_dimensions: dict[str, Any] = Field(default_factory=dict)
     transcript_character_count: int = 0
     response_character_count: int = 0
     estimated_provider_cost: float = 0.0

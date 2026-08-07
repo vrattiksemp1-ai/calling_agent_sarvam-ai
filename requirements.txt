@@ -4,6 +4,7 @@ pydantic==2.10.4
 pydantic-settings==2.7.0
 sqlalchemy==2.0.36
 httpx==0.28.1
+websockets==17.0.1
 # PostgreSQL driver - required only if you set DATABASE_URL to postgresql://...
 psycopg2-binary==2.9.10
 python-multipart==0.0.20

@@ -38,6 +38,7 @@ async def test_sarvam_retries_transient_error(monkeypatch, tmp_path):
     text, _, _ = await client.transcribe(str(path), 500)
     assert text == "recovered"
     assert len(calls) == 3  # 1 + MAX_RETRIES(2)
+    assert client.last_attempt_count == 3
 
 
 @pytest.mark.asyncio
@@ -93,6 +94,7 @@ async def test_llm_retries_then_succeeds(monkeypatch, tmp_path):
     )
     assert "assistant_message" in text
     assert len(calls) == 3
+    assert client.last_attempt_count == 3
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,213 @@
+{
+  "schema_version": "1.0",
+  "retain_audio": false,
+  "storage_policy": "IDs, scripts, expected entities, telemetry, and human ratings only. Audio storage is disabled by default.",
+  "rating_fields": [
+    "native_language_naturalness_1_to_5",
+    "pronunciation_1_to_5",
+    "empathy_and_cadence_1_to_5",
+    "task_success_boolean",
+    "notes"
+  ],
+  "scenarios": [
+    {
+      "id": "gu-01-basic-consent",
+      "language": "Gujarati",
+      "tags": ["consent", "lead_extraction"],
+      "script": ["હેલો, મારું નામ મિતેશ પટેલ છે.", "મારે મારી દુકાન માટે CRM જોઈએ છે.", "હા, તમે મને કૉલ કરી શકો.", "હા, વિગતો સાચી છે."],
+      "expected_entities": {"full_name": "મિતેશ પટેલ", "business_requirement": "CRM for shop", "consent_to_contact": "yes"}
+    },
+    {
+      "id": "gu-02-name-number-noise",
+      "language": "Gujarati",
+      "tags": ["name", "number", "gsm_noise"],
+      "script": ["[GSM noise] મારું નામ હેતલ શાહ.", "નંબર નવ આઠ સાત છ પાંચ ચાર ત્રણ બે એક શૂન્ય છે.", "નામ અને નંબર પાછા કહી confirm કરો."],
+      "expected_entities": {"full_name": "હેતલ શાહ", "phone_number": "9876543210"}
+    },
+    {
+      "id": "gu-03-pause-endpoint",
+      "language": "Gujarati",
+      "tags": ["long_pause", "false_endpoint"],
+      "script": ["અમારી requirement છે... [2 second pause] customer support automate કરવું.", "હજુ વાક્ય પૂરું થયું નહોતું."],
+      "expected_entities": {"business_requirement": "automate customer support"}
+    },
+    {
+      "id": "gu-04-interruption",
+      "language": "Gujarati",
+      "tags": ["barge_in", "cross_talk"],
+      "script": ["મારે accounting software—", "[interrupt assistant] એક મિનિટ, પહેલા pricing કહો.", "[cross-talk] budget પચાસ હજાર છે."],
+      "expected_entities": {"product_or_service_interest": "accounting software", "estimated_budget": "50000"}
+    },
+    {
+      "id": "gu-05-refuse-consent",
+      "language": "Gujarati",
+      "tags": ["consent", "refusal"],
+      "script": ["મારું નામ નીરવ છે અને website બનાવવી છે.", "ના, મને પછી contact ન કરતા.", "શું call complete થઈ ગઈ એવું કહેશો?"],
+      "expected_entities": {"full_name": "નીરવ", "business_requirement": "website", "consent_to_contact": "no"}
+    },
+    {
+      "id": "hi-01-basic-consent",
+      "language": "Hindi",
+      "tags": ["consent", "lead_extraction"],
+      "script": ["मेरा नाम कविता शर्मा है।", "मुझे sales automation चाहिए।", "हाँ, आप बाद में संपर्क कर सकते हैं।", "हाँ, summary सही है।"],
+      "expected_entities": {"full_name": "कविता शर्मा", "business_requirement": "sales automation", "consent_to_contact": "yes"}
+    },
+    {
+      "id": "hi-02-accent-spelling",
+      "language": "Hindi",
+      "tags": ["accent", "name", "clarification"],
+      "script": ["मेरा नाम श्रीयांश है।", "अगर नाम साफ़ नहीं आया तो मुझसे spelling पूछिए।", "S H R E E Y A N S H."],
+      "expected_entities": {"full_name": "Shreeyansh"}
+    },
+    {
+      "id": "hi-03-number-correction",
+      "language": "Hindi",
+      "tags": ["number", "correction"],
+      "script": ["मेरा नंबर 9812345670 है।", "नहीं, आखिरी अंक शून्य नहीं, आठ है।"],
+      "expected_entities": {"phone_number": "9812345678"}
+    },
+    {
+      "id": "hi-04-busy-callback",
+      "language": "Hindi",
+      "tags": ["callback", "pause_intent"],
+      "script": ["अभी मैं busy हूँ, बाद में call करना।", "कल सुबह ग्यारह बजे ठीक रहेगा।"],
+      "expected_entities": {"preferred_contact_time": "tomorrow 11:00"}
+    },
+    {
+      "id": "hi-05-cross-talk",
+      "language": "Hindi",
+      "tags": ["cross_talk", "barge_in", "consent"],
+      "script": ["[second speaker in background] हमारी company का नाम Navrang है।", "[interrupt assistant] budget दो लाख है।", "संपर्क के लिए अभी consent नहीं दिया है।"],
+      "expected_entities": {"company_name": "Navrang", "estimated_budget": "200000"}
+    },
+    {
+      "id": "en-01-basic-consent",
+      "language": "English",
+      "tags": ["consent", "lead_extraction"],
+      "script": ["My name is Anita Rao.", "We need a multilingual support bot.", "Yes, you may contact me.", "The summary is correct."],
+      "expected_entities": {"full_name": "Anita Rao", "business_requirement": "multilingual support bot", "consent_to_contact": "yes"}
+    },
+    {
+      "id": "en-02-gsm-email",
+      "language": "English",
+      "tags": ["gsm_noise", "email", "clarification"],
+      "script": ["[GSM noise] My email is dev dot ops at acme dot in.", "Please read that back before continuing."],
+      "expected_entities": {"email": "dev.ops@acme.in"}
+    },
+    {
+      "id": "en-03-long-pause",
+      "language": "English",
+      "tags": ["long_pause", "false_endpoint"],
+      "script": ["We currently use... [2 second pause] spreadsheets and WhatsApp.", "I want the sentence treated as one turn."],
+      "expected_entities": {"current_solution": "spreadsheets and WhatsApp"}
+    },
+    {
+      "id": "en-04-interrupt-correction",
+      "language": "English",
+      "tags": ["barge_in", "correction"],
+      "script": ["Our budget is eighty thousand—", "[interrupt assistant] sorry, make that one lakh rupees.", "The timeline is three months."],
+      "expected_entities": {"estimated_budget": "100000 INR", "purchase_timeline": "3 months"}
+    },
+    {
+      "id": "en-05-no-consent",
+      "language": "English",
+      "tags": ["consent", "consequential_safety"],
+      "script": ["I need an inventory system.", "No, do not contact me after this call.", "Confirm that you will not mark this lead complete."],
+      "expected_entities": {"business_requirement": "inventory system", "consent_to_contact": "no"}
+    },
+    {
+      "id": "gujlish-01-switch-clause",
+      "language": "Gujlish",
+      "tags": ["code_switch", "mid_sentence_switch"],
+      "script": ["મારું નામ Rohan છે and I need a CRM for my retail shop.", "હવે Englishમાં explain the pricing options.", "Switch in the next clause, not after another turn."],
+      "expected_entities": {"full_name": "Rohan", "business_requirement": "CRM for retail shop", "preferred_language": "English"}
+    },
+    {
+      "id": "gujlish-02-name-number",
+      "language": "Gujlish",
+      "tags": ["name", "number", "code_switch"],
+      "script": ["હું Krunal Desai, my phone is nine eight two five zero one two three four five.", "Number પાછો read કરી confirm કરજો."],
+      "expected_entities": {"full_name": "Krunal Desai", "phone_number": "9825012345"}
+    },
+    {
+      "id": "gujlish-03-rushed",
+      "language": "Gujlish",
+      "tags": ["style_signal", "rushed", "cadence"],
+      "script": ["મારી પાસે time નથી, quickly પૂછો.", "Need website redesign, budget around 75k.", "હા contact કરી શકો."],
+      "expected_entities": {"business_requirement": "website redesign", "estimated_budget": "75000", "consent_to_contact": "yes"}
+    },
+    {
+      "id": "gujlish-04-frustrated",
+      "language": "Gujlish",
+      "tags": ["style_signal", "frustrated", "non_consequential"],
+      "script": ["વારંવાર same question ના પૂછો, it's frustrating.", "I already said company name is Orbit.", "My frustration is not consent."],
+      "expected_entities": {"company_name": "Orbit"}
+    },
+    {
+      "id": "gujlish-05-cross-talk",
+      "language": "Gujlish",
+      "tags": ["cross_talk", "barge_in", "consent"],
+      "script": ["[cross-talk] અમારે voice automation જોઈએ છે.", "[interrupt assistant] wait, contact preference WhatsApp છે.", "હા, follow up કરી શકો."],
+      "expected_entities": {"business_requirement": "voice automation", "preferred_contact_method": "WhatsApp", "consent_to_contact": "yes"}
+    },
+    {
+      "id": "hinglish-01-switch-clause",
+      "language": "Hinglish",
+      "tags": ["code_switch", "mid_sentence_switch"],
+      "script": ["Mera naam Faizan hai and we need billing software.", "अब English में continue please.", "Switch within this clause."],
+      "expected_entities": {"full_name": "Faizan", "business_requirement": "billing software", "preferred_language": "English"}
+    },
+    {
+      "id": "hinglish-02-number-noise",
+      "language": "Hinglish",
+      "tags": ["number", "gsm_noise", "clarification"],
+      "script": ["[GSM noise] number hai nine nine one zero zero two three four five six.", "Please number repeat करके confirm करो."],
+      "expected_entities": {"phone_number": "9910023456"}
+    },
+    {
+      "id": "hinglish-03-pause",
+      "language": "Hinglish",
+      "tags": ["long_pause", "false_endpoint"],
+      "script": ["Current solution hai... [2 second pause] manual Excel reports.", "Pause को endpoint मत मानना."],
+      "expected_entities": {"current_solution": "manual Excel reports"}
+    },
+    {
+      "id": "hinglish-04-interrupt",
+      "language": "Hinglish",
+      "tags": ["barge_in", "correction"],
+      "script": ["Budget one lakh—", "[interrupt assistant] actually डेढ़ लाख तक जा सकते हैं.", "Timeline next quarter है."],
+      "expected_entities": {"estimated_budget": "150000 INR", "purchase_timeline": "next quarter"}
+    },
+    {
+      "id": "hinglish-05-consent-boundary",
+      "language": "Hinglish",
+      "tags": ["consent", "style_signal", "non_consequential"],
+      "script": ["Sounds good, but that is not consent to contact.", "पहले summary बताओ.", "No, do not contact me."],
+      "expected_entities": {"consent_to_contact": "no"}
+    }
+  ],
+  "expansion_templates": {
+    "100_calls": {
+      "calls_per_cell": 25,
+      "total_cells": 4,
+      "total_calls": 100,
+      "method": "Run every smoke scenario once in each cell with native-speaker/manual ratings."
+    },
+    "200_calls": {
+      "calls_per_cell": 50,
+      "total_cells": 4,
+      "total_calls": 200,
+      "method": "Run every smoke scenario twice in each cell using different speakers, accents, carrier conditions, and ordering."
+    },
+    "variation_axes": [
+      "native speaker",
+      "regional accent",
+      "male/female voice",
+      "quiet/GSM-noise environment",
+      "normal/long pauses",
+      "cross-talk",
+      "barge-in timing",
+      "mid-sentence code switch"
+    ]
+  }
+}

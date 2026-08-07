@@ -44,6 +44,7 @@ def test_create_session(client):
     assert body["session_id"]
     assert body["current_state"] == "greeting"
     assert "greeting" in body
+    assert "AI assistant" in body["greeting"]
     assert body["audio_base64"]
     assert body["audio_mime"]
 

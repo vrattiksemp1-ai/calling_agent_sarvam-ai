@@ -30,7 +30,7 @@ from backend.config import Settings
 from backend.conversation import ConversationEngine
 from backend.database import session_scope
 from backend.errors import AppError
-from backend.metrics import TurnTimings
+from backend.metrics import TurnTimings, persist_turn_telemetry
 from backend.models import Message, Session
 from backend.providers.sarvam_client import SarvamClient
 from backend.telephony.call_manager import (
@@ -71,6 +71,7 @@ GATHER_LANGUAGES = {
     "gu": "gu-IN",
     "gu-in": "gu-IN",
     "gujarati": "gu-IN",
+    "gujlish": "gu-IN",
 }
 
 
@@ -96,6 +97,7 @@ class TtsStream:
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     done: asyncio.Event = field(default_factory=asyncio.Event)
     error: Exception | None = None
+    timings: TurnTimings | None = None
 
 
 @dataclass
@@ -111,6 +113,7 @@ class PendingTurn:
     language: str | None = None
     task: asyncio.Task | None = None
     created_at: float = field(default_factory=time.monotonic)
+    timings: TurnTimings | None = None
 
 
 class TurnFlow:
@@ -132,6 +135,7 @@ class TurnFlow:
         self._twilio = twilio
         self._registry = registry
         self._tts_streams: dict[str, TtsStream] = {}
+        self._hosted_timings: dict[str, TurnTimings] = {}
         self._pending_turns: dict[str, PendingTurn] = {}
         # lang -> (cached_at, twiml, greeting_text)
         self._greeting_cache: dict[str, tuple[float, str, str]] = {}
@@ -173,6 +177,8 @@ class TurnFlow:
         Gujarati/Hindi script and turns hold phrases like "એક સેકન્ડ" into
         garbled one-word noise ("start", etc.).
         """
+        if pending.timings is not None:
+            pending.timings.mark("redirect_issued")
         url = self._twilio.turn_result_url(pending.call_sid, pending.token)
         return (
             '<?xml version="1.0" encoding="UTF-8"?>'
@@ -257,7 +263,10 @@ class TurnFlow:
             pass
 
     async def _host_tts(
-        self, text: str, detected_language: str | None
+        self,
+        text: str,
+        detected_language: str | None,
+        timings: TurnTimings | None = None,
     ) -> tuple[str | None, int]:
         """Synthesize with Sarvam and return a public URL for <Play>."""
         try:
@@ -267,15 +276,30 @@ class TurnFlow:
             return None, 0
         if not audio:
             return None, 0
+        if timings is not None:
+            timings.retry_count += max(
+                0, getattr(self._sarvam, "last_attempt_count", 1) - 1
+            )
+            timings.tts_provider = "sarvam"
+            if timings.tts_mode != "streaming_to_buffered":
+                timings.tts_mode = "buffered"
+            timings.tts_attempted = True
+            timings.tts_latency_ms = tts_ms
+            timings.mark("tts_first_audio")
         self._sweep_tts_dir()
         file_id = uuid.uuid4().hex
         path = self._tts_dir() / f"{file_id}.wav"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(audio)
+        if timings is not None:
+            self._hosted_timings[file_id] = timings
         return self._twilio.audio_url(file_id), tts_ms
 
     async def _stream_tts(
-        self, text: str, detected_language: str | None
+        self,
+        text: str,
+        detected_language: str | None,
+        timings: TurnTimings | None = None,
     ) -> tuple[str | None, int]:
         """Start streaming TTS and return a public <Play> URL for it.
 
@@ -285,10 +309,14 @@ class TurnFlow:
         time, so callers can fall back to the buffered file path.
         """
         if not self._settings.sarvam_tts_streaming:
-            return await self._host_tts(text, detected_language)
+            return await self._host_tts(text, detected_language, timings)
         token = uuid.uuid4().hex
-        stream = TtsStream()
+        stream = TtsStream(timings=timings)
         self._tts_streams[token] = stream
+        if timings is not None:
+            timings.tts_provider = "sarvam"
+            timings.tts_mode = "streaming"
+            timings.tts_attempted = True
         task = asyncio.create_task(
             self._run_tts_stream(token, stream, text, detected_language)
         )
@@ -306,15 +334,23 @@ class TurnFlow:
             task.cancel()
             self._tts_streams.pop(token, None)
             logger.warning("Streaming TTS produced no audio in time; using buffered TTS.")
-            return await self._host_tts(text, detected_language)
+            if timings is not None:
+                timings.fallback_count += 1
+                timings.tts_mode = "streaming_to_buffered"
+            return await self._host_tts(text, detected_language, timings)
         finally:
             ready_task.cancel()
             done_task.cancel()
         if not stream.ready.is_set():
             task.cancel()
             self._tts_streams.pop(token, None)
-            return await self._host_tts(text, detected_language)
+            if timings is not None:
+                timings.fallback_count += 1
+                timings.tts_mode = "streaming_to_buffered"
+            return await self._host_tts(text, detected_language, timings)
         first_chunk_ms = int((time.monotonic() - started) * 1000)
+        if timings is not None:
+            timings.tts_latency_ms = first_chunk_ms
         return self._twilio.audio_url(token), first_chunk_ms
 
     async def _run_tts_stream(
@@ -328,6 +364,8 @@ class TurnFlow:
         try:
             async for chunk in self._sarvam.stream_synthesize(text, detected_language):
                 stream.queue.put_nowait(chunk)
+                if stream.timings is not None:
+                    stream.timings.mark("tts_first_audio")
                 stream.ready.set()
         except AppError as exc:
             logger.warning("Streaming TTS failed: %s", exc.code)
@@ -343,6 +381,32 @@ class TurnFlow:
 
     def drop_tts_stream(self, token: str) -> None:
         self._tts_streams.pop(token, None)
+
+    def mark_audio_outbound(self, token: str) -> None:
+        """Record when the first response bytes leave for Twilio's <Play>."""
+        stream = self._tts_streams.get(token)
+        timings = stream.timings if stream is not None else self._hosted_timings.pop(
+            token, None
+        )
+        if timings is None:
+            return
+        if "first_outbound_audio" in timings.phase_elapsed_ms:
+            return
+        timings.mark("first_outbound_audio")
+        self._persist_timings(timings)
+        timings.log(logger, event="first_outbound_audio")
+
+    def _persist_timings(self, timings: TurnTimings) -> None:
+        if not timings.session_id:
+            return
+        with session_scope(self._factory) as db:
+            persist_turn_telemetry(db, timings.session_id, timings)
+            if timings.assistant_message_id is not None:
+                message = db.get(Message, timings.assistant_message_id)
+                caller_latency = timings.caller_perceived()
+                if message is not None and caller_latency is not None:
+                    message.total_turn_latency_ms = caller_latency
+                    db.add(message)
 
     # ---------- entry points ----------
 
@@ -512,7 +576,14 @@ class TurnFlow:
             call_sid=call_sid,
             token=uuid.uuid4().hex,
             language=self._settings.default_language,
+            timings=TurnTimings(
+                settings=self._settings,
+                transport="twilio_gather",
+                stt_provider="twilio",
+            ),
         )
+        pending.timings.transcript_char_count = len(text)
+        pending.timings.mark("transcript_received")
         # Seed language from the live session so the hold filler matches.
         if record.session_id:
             with session_scope(self._factory) as db:
@@ -530,14 +601,19 @@ class TurnFlow:
                 pending.done.wait(), timeout=TURN_INLINE_BUDGET_SECONDS
             )
         except asyncio.TimeoutError:
+            content = self._pending_redirect_twiml(pending)
+            if pending.timings is not None:
+                pending.timings.log(logger, event="turn_redirected")
             logger.warning(
                 "Turn for %s still running after %.1fs; deferring via Redirect",
                 call_sid,
                 TURN_INLINE_BUDGET_SECONDS,
             )
-            return self._pending_redirect_twiml(pending)
+            return content
 
         self._pending_turns.pop(call_sid, None)
+        if pending.timings is not None:
+            pending.timings.log(logger)
         if pending.error is not None or not pending.twiml:
             lang = pending.language or self._settings.default_language
             repeat = fallback_text("repeat", "en")
@@ -564,6 +640,19 @@ class TurnFlow:
             return self._say_gather_twiml(repeat, language=lang)
 
         pending.polls += 1
+        poll_started = time.monotonic()
+        if pending.timings is not None:
+            pending.timings.transport_retry_count = pending.polls
+            pending.timings.mark("redirect_poll_received")
+            redirect_elapsed = pending.timings.duration_between(
+                "redirect_issued", "redirect_poll_received"
+            )
+            if redirect_elapsed is not None and "redirect_transit_delay" not in (
+                pending.timings.phase_durations_ms
+            ):
+                pending.timings.add_duration(
+                    "redirect_transit_delay", redirect_elapsed
+                )
         logger.info(
             "turn-result poll=%s call_sid=%s done=%s",
             pending.polls,
@@ -573,17 +662,32 @@ class TurnFlow:
         try:
             await asyncio.wait_for(pending.done.wait(), timeout=TURN_POLL_WAIT_SECONDS)
         except asyncio.TimeoutError:
+            if pending.timings is not None:
+                pending.timings.add_duration(
+                    "redirect_poll_delay",
+                    int((time.monotonic() - poll_started) * 1000),
+                )
+                pending.timings.log(logger, event="turn_poll_timeout")
             if pending.polls >= MAX_TURN_POLLS:
                 logger.error(
                     "Turn for %s exceeded max polls; falling back", call_sid
                 )
+                if pending.timings is not None:
+                    self._persist_timings(pending.timings)
                 self._drop_pending(call_sid)
                 lang = pending.language or self._settings.default_language
                 repeat = fallback_text("repeat", "en")
                 return self._say_gather_twiml(repeat, language=lang)
             return self._pending_redirect_twiml(pending)
 
+        if pending.timings is not None:
+            pending.timings.add_duration(
+                "redirect_poll_delay",
+                int((time.monotonic() - poll_started) * 1000),
+            )
         self._pending_turns.pop(call_sid, None)
+        if pending.timings is not None:
+            pending.timings.log(logger)
         if pending.error is not None or not pending.twiml:
             lang = pending.language or self._settings.default_language
             repeat = fallback_text("repeat", "en")
@@ -628,8 +732,18 @@ class TurnFlow:
             if pending is not None:
                 pending.language = detected_language
 
-            timings = TurnTimings(settings=self._settings)
+            timings = (
+                pending.timings
+                if pending is not None and pending.timings is not None
+                else TurnTimings(
+                    settings=self._settings,
+                    transport="twilio_gather",
+                    stt_provider="twilio",
+                )
+            )
+            timings.session_id = session.id
             timings.transcript_char_count = len(text)
+            timings.mark("transcript_received")
             _, parsed = await self._engine.process_turn(db, session, text, timings)
             reply = parsed.assistant_message or ""
             timings.response_char_count = len(reply)
@@ -641,9 +755,10 @@ class TurnFlow:
             abandoned = session.status == "abandoned"
 
             if not completed and not abandoned:
-                reply_url, tts_ms = await self._stream_tts(reply, detected_language)
+                reply_url, tts_ms = await self._stream_tts(
+                    reply, detected_language, timings
+                )
                 if reply_url:
-                    timings.tts_attempted = True
                     timings.tts_latency_ms = tts_ms
                     last_assistant = (
                         db.query(Message)
@@ -655,6 +770,7 @@ class TurnFlow:
                         .first()
                     )
                     if last_assistant is not None:
+                        timings.assistant_message_id = last_assistant.id
                         last_assistant.tts_latency_ms = timings.tts_latency_ms
                         last_assistant.total_turn_latency_ms = timings.total()
                         last_assistant.estimated_provider_cost = (
@@ -662,18 +778,25 @@ class TurnFlow:
                             + timings.estimated_tts_cost()
                         )
                         db.add(last_assistant)
+                persist_turn_telemetry(db, session.id, timings)
 
         if completed:
             final_url, _ = (
-                await self._stream_tts(reply, detected_language) if reply else (None, 0)
+                await self._stream_tts(reply, detected_language, timings)
+                if reply
+                else (None, 0)
             )
             goodbye = fallback_text("goodbye", detected_language)
             goodbye_url, _ = await self._host_tts(goodbye, detected_language)
+            self._persist_timings(timings)
             return self._final_twiml(final_url, goodbye_url, reply, goodbye)
 
         if abandoned:
             farewell = reply or fallback_text("goodbye", detected_language)
-            farewell_url, _ = await self._stream_tts(farewell, detected_language)
+            farewell_url, _ = await self._stream_tts(
+                farewell, detected_language, timings
+            )
+            self._persist_timings(timings)
             return self._farewell_twiml(farewell_url, farewell)
 
         return self._gather_twiml(
