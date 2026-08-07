@@ -450,24 +450,30 @@ async function initCallPicker() {
   const select = els.callNumber;
   select.innerHTML = "";
 
+  // Prefer the configured/verified dropdown whenever we have numbers from
+  // .env (TWILIO_VERIFIED_NUMBERS) or Twilio Console — including Media Streams
+  // mode where trial_mode is false.
+  if (numbers.length > 0) {
+    els.callNumberCustom.style.display = "none";
+    select.style.display = "";
+    numbers.forEach((n) => {
+      const opt = document.createElement("option");
+      opt.value = n;
+      opt.textContent = n;
+      select.appendChild(opt);
+    });
+    return;
+  }
+
   if (state.callTrialMode) {
     els.callNumberCustom.style.display = "none";
     select.style.display = "";
-    if (numbers.length === 0) {
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = "No verified numbers — add one in the Twilio Console";
-      opt.disabled = true;
-      opt.selected = true;
-      select.appendChild(opt);
-    } else {
-      numbers.forEach((n) => {
-        const opt = document.createElement("option");
-        opt.value = n;
-        opt.textContent = n;
-        select.appendChild(opt);
-      });
-    }
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "No verified numbers — add one in .env or Twilio Console";
+    opt.disabled = true;
+    opt.selected = true;
+    select.appendChild(opt);
   } else {
     select.style.display = "none";
     els.callNumberCustom.style.display = "";
@@ -500,8 +506,8 @@ async function placeCall() {
   if (state.placingCall || state.activeCallSid) return;
   const number = (els.callNumber.value || els.callNumberCustom.value || "").trim();
   if (!number) {
-    showError(state.callTrialMode
-      ? "Choose a verified destination number from the dropdown first."
+    showError(els.callNumber.style.display !== "none"
+      ? "Choose a destination number from the dropdown first."
       : "Enter the destination number first (E.164 format, e.g. +919876543210).");
     return;
   }

@@ -83,15 +83,14 @@ def _call_service(request: Request, provider: str):
 async def list_verified_numbers(request: Request) -> dict:
     """Destination numbers the caller may choose from (dropdown source).
 
-    Trial mode: numbers verified in the Twilio Console plus any configured
-    fallback numbers. Non-trial mode: returns all (no restriction), the
-    frontend simply allows free-form entry.
+    Always returns ``TWILIO_VERIFIED_NUMBERS`` / ``TWILIO_TEST_PHONE_NUMBER``
+    from settings (plus Twilio Console verified IDs when reachable). The
+    frontend uses this list for the picker whether or not Gather trial mode
+    is enabled; free-form entry is only used when the list is empty.
     """
     twilio = _twilio(request)
-    if not twilio.trial_mode:
-        return {"verified_numbers": [], "trial_mode": False}
     numbers = await twilio.verified_numbers()
-    return {"verified_numbers": numbers, "trial_mode": True}
+    return {"verified_numbers": numbers, "trial_mode": twilio.trial_mode}
 
 
 @router.post("", response_model=CallStatusOut)

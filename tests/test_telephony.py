@@ -480,6 +480,46 @@ def test_verified_numbers_endpoint(client):
     assert "+917048211715" in body["verified_numbers"]
 
 
+def test_verified_numbers_endpoint_keeps_env_list_outside_trial_mode(tmp_path):
+    """Media Streams mode still exposes TWILIO_VERIFIED_NUMBERS for the picker."""
+    from fastapi.testclient import TestClient
+
+    from backend.main import build_app
+    from tests.conftest import (
+        make_mock_llm_client,
+        make_mock_sarvam_client,
+        make_mock_twilio_client,
+        make_settings,
+        lead_llm_handler,
+        sarvam_handler,
+    )
+
+    settings = make_settings(
+        tmp_path,
+        sarvam_api_key="test-key",
+        llm_api_key="test-key",
+        twilio_account_sid="AC-test",
+        twilio_auth_token="token-test",
+        twilio_phone_number="+15005550006",
+        public_base_url="https://example.ngrok-free.app",
+        twilio_trial_mode=False,
+        twilio_test_phone_number="+919428748109",
+        twilio_verified_numbers="+919428748109",
+    )
+    app = build_app(
+        settings,
+        llm_client=make_mock_llm_client(settings, lead_llm_handler),
+        sarvam_client=make_mock_sarvam_client(settings, sarvam_handler),
+        twilio_client=make_mock_twilio_client(settings),
+    )
+    with TestClient(app) as client:
+        resp = client.get("/api/calls/numbers")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["trial_mode"] is False
+    assert "+919428748109" in body["verified_numbers"]
+
+
 def test_twiml_endpoint(client):
     # trial mode -> <Gather input="speech"> turn loop, no <Stream>
     resp = client.post("/api/calls/twiml")
