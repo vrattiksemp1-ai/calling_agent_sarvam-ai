@@ -8,6 +8,7 @@ Sarvam cloud API (STT + TTS + optional chat) rather than to local services.
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -61,12 +62,12 @@ class Settings(BaseSettings):
     sarvam_stt_mode: str = "transcribe"
     sarvam_language_code: str = "unknown"
     sarvam_tts_model: str = "bulbul:v3"
-    sarvam_tts_speaker: str = "shubh"
-    sarvam_tts_language_code: str = "hi-IN"
-    # Bulbul v3 expressiveness/speed. Higher temperature = more expressive,
-    # human-feeling prosody; pace 0.5-2.0 (1.0 is natural).
-    sarvam_tts_temperature: float = 1.0
-    sarvam_tts_pace: float = 0.95
+    sarvam_tts_speaker: str = "ritu"
+    sarvam_tts_language_code: str = "gu-IN"
+    # Bulbul v3 expressiveness/speed. Sarvam recommends ~0.7-0.8 for warm
+    # conversational agents; 1.0 is natural pace.
+    sarvam_tts_temperature: float = 0.75
+    sarvam_tts_pace: float = 1.0
     # Output sample rate for Sarvam TTS. 8000 Hz is best for Twilio telephony
     # (avoids Twilio's lower-quality resampling of full-band audio); higher
     # rates (24000/48000) only matter for non-phone playback.
@@ -84,6 +85,8 @@ class Settings(BaseSettings):
     llm_model: str = "sarvam-105b"
     llm_timeout: float = 120.0
     llm_use_json_mode: bool = True
+    # Higher than 0.2 so wording feels human; still low enough for JSON structure.
+    llm_temperature: float = 0.55
     # Sarvam reasoning/thinking mode. Empty = leave the provider default (Sarvam
     # defaults to thinking ON, which adds several seconds of hidden reasoning and
     # completion cost per turn). "none"/"off"/"false" sends reasoning_effort=null
@@ -126,6 +129,15 @@ class Settings(BaseSettings):
     tts_rate_per_10k_chars_inr: float = 30.0
     llm_input_rate_per_million_inr: float = 4.0
     llm_output_rate_per_million_inr: float = 16.0
+
+    @field_validator("sarvam_tts_speaker", mode="before")
+    @classmethod
+    def _clean_tts_speaker(cls, value: object) -> object:
+        """Strip inline comments / whitespace from .env speaker values."""
+        if not isinstance(value, str):
+            return value
+        cleaned = value.split("#", 1)[0].strip().strip("\"'")
+        return cleaned or "ritu"
 
     @property
     def resolved_temp_dir(self) -> Path:

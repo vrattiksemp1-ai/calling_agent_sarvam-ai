@@ -20,6 +20,10 @@ from backend.models import (
     ProviderEvent,
     Session,
 )
+from backend.language_utils import (
+    infer_script_language,
+    resolve_turn_language,
+)
 from backend.prompts import REFUSAL_TOKEN
 from backend.providers.llm_client import LlmClient
 from backend.schemas import LeadOut
@@ -47,6 +51,19 @@ class ConversationEngine:
         if lead is None:
             return {}
         return {name: (getattr(lead, name) or "") for name in LEAD_FIELDS}
+
+    @staticmethod
+    def _reply_language_mismatch(reply: str, expected: str) -> bool:
+        """True when a pinned gu/hi turn got a Latin-only English-looking reply."""
+        if not reply or not reply.strip():
+            return False
+        script = infer_script_language(reply)
+        if script == expected:
+            return False
+        if script in {"gu", "hi"} and script != expected:
+            return True
+        latin = sum(1 for ch in reply if ("a" <= ch.lower() <= "z"))
+        return script is None and latin >= 12
 
     def _apply_extraction(
         self, db: OrmSession, lead: Lead, parsed, session: Session
@@ -121,7 +138,12 @@ class ConversationEngine:
                 business_name=self._business_name,
                 business_description=self._business_description,
             )
-            raw, latency, usage = await self._llm.generate(messages)
+            # Phone turns need one fast shot: no provider retries, short replies.
+            raw, latency, usage = await self._llm.generate(
+                messages,
+                max_tokens=self._llm._settings.llm_max_tokens or 220,
+                max_retries=0,
+            )
             timings.llm_latency_ms = latency
             timings.llm_usage = usage
             return raw
@@ -193,19 +215,82 @@ class ConversationEngine:
         ]
         history.append({"role": "user", "content": user_text})
 
-        # On Sarvam-STT paths the STT engine's own auto-detected language pins
-        # the reply language (provider signal, not a hardcoded list). On
-        # Twilio's <Gather> path there is no STT language, so the agent judges
-        # the language itself and its detected_language drives the session.
-        turn_language = stt_language
+        # Resolve a hard language pin when we have a clear signal; otherwise let
+        # the LLM follow the latest utterance (important for mid-call switches).
+        prior_language = (session.language or "").strip().lower() or None
+        turn_language = resolve_turn_language(
+            user_text,
+            prior_language=prior_language,
+            stt_language=stt_language,
+        )
         parsed = await self._llm_turn(
             db, session, lead, user_text, history, timings, language=turn_language
         )
 
-        if turn_language:
+        # Prefer the hard pin when present. Otherwise trust the model, then the
+        # script of its reply, then keep the prior language.
+        model_detected = (
+            getattr(parsed, "detected_language", None) or ""
+        ).strip().lower() or None
+        reply_script = infer_script_language(parsed.assistant_message or "")
+        if turn_language in {"gu", "hi", "en"}:
             session.language = turn_language
-        elif getattr(parsed, "detected_language", None):
-            session.language = parsed.detected_language
+            parsed.detected_language = turn_language
+        elif model_detected in {"gu", "hi", "en", "en-hi"}:
+            session.language = "hi" if model_detected == "en-hi" else model_detected
+        elif reply_script:
+            session.language = reply_script
+            parsed.detected_language = reply_script
+        elif prior_language:
+            session.language = prior_language
+            parsed.detected_language = prior_language
+
+        # If we hard-pinned gu/hi from Indic script but the model answered in
+        # English, that often means phone ASR wrote English phonetics in
+        # Gujarati/Hindi letters. Trust an explicit English detection from the
+        # model (real switch). Only use a fast fallback when the model also
+        # claimed gu/hi but wrote Latin English.
+        if turn_language in {"gu", "hi"} and self._reply_language_mismatch(
+            parsed.assistant_message or "", turn_language
+        ):
+            if model_detected in {"en", "en-hi"}:
+                logger.info(
+                    "Indic-script ASR with English reply; switching session to en"
+                )
+                session.language = "en"
+                parsed.detected_language = "en"
+            else:
+                logger.warning(
+                    "LLM reply language mismatched pin=%s; using fast fallback",
+                    turn_language,
+                )
+                from backend.telephony.call_manager import fallback_text
+
+                parsed.assistant_message = fallback_text("repeat", turn_language)
+                parsed.detected_language = turn_language
+                session.language = turn_language
+
+        # Soft anti-repeat: if the model pasted the previous assistant line,
+        # force a short clarification instead of playing the same audio again.
+        if history:
+            last_assistant = next(
+                (
+                    m["content"]
+                    for m in reversed(history)
+                    if m.get("role") == "assistant" and m.get("content")
+                ),
+                None,
+            )
+            current = (parsed.assistant_message or "").strip()
+            if (
+                last_assistant
+                and current
+                and current == last_assistant.strip()
+            ):
+                from backend.telephony.call_manager import fallback_text
+
+                lang = session.language or turn_language or "en"
+                parsed.assistant_message = fallback_text("repeat", lang)
 
         if session.current_state == "greeting":
             session.current_state = "collecting_identity"

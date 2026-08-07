@@ -175,6 +175,19 @@ class TwilioService:
             url += f"?turn_token={secret}"
         return url + WEBHOOK_CONNECTION_OVERRIDES
 
+    def turn_result_url(self, call_sid: str, pending_token: str) -> str:
+        """Webhook Twilio Redirects to while a slow turn finishes in-process."""
+        from urllib.parse import urlencode
+
+        query = {"call_sid": call_sid, "pending": pending_token}
+        secret = self._settings.twilio_turn_webhook_secret
+        if secret:
+            query["turn_token"] = secret
+        return (
+            f"{self.public_base()}/api/calls/turn-result?{urlencode(query)}"
+            + WEBHOOK_CONNECTION_OVERRIDES
+        )
+
     def audio_url(self, file_id: str) -> str:
         """Public URL for a hosted TTS WAV that <Play> can fetch."""
         return f"{self.public_base()}/api/calls/audio/{file_id}" + WEBHOOK_CONNECTION_OVERRIDES
@@ -343,13 +356,13 @@ class TwilioService:
     ) -> bool:
         """Validate a <Gather> turn webhook.
 
-        When X-Twilio-Signature is present it is checked strictly (the normal
-        Twilio path). The speech-recognition action callback is, in practice,
-        sent without a signature header, so then we require the shared-secret
-        turn_token that was embedded in the action URL instead.
+        When X-Twilio-Signature is present it is checked first. Redirect and
+        speech-recognition callbacks are often unsigned or signed against a
+        slightly different public URL behind ngrok, so a matching shared-secret
+        turn_token is also accepted.
         """
-        if signature:
-            return self.validate_signature(uri, params, signature)
+        if signature and self.validate_signature(uri, params, signature):
+            return True
         secret = self._settings.twilio_turn_webhook_secret
         if not secret:
             return True

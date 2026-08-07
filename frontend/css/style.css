@@ -73,6 +73,7 @@ html, body {
 .btn-talk { background: var(--warn); border-color: var(--warn); color: #1a1000; }
 .btn-talk.recording { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn-call { background: var(--accent-2); border-color: var(--accent-2); color: #160d00; }
+.btn-hangup { background: var(--danger); border-color: var(--danger); color: #fff; }
 
 .call-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
 .call-bar input,

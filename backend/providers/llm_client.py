@@ -54,17 +54,33 @@ class LlmClient:
             base = self._settings.llm_base_url.rstrip("/")
         return f"{base}/v1/chat/completions"
 
-    async def _chat(self, messages: list[dict]) -> httpx.Response:
+    async def _chat(
+        self,
+        messages: list[dict],
+        *,
+        max_tokens: int | None = None,
+        max_retries: int | None = None,
+    ) -> httpx.Response:
         last_error: Exception | None = None
-        attempts = 1 + MAX_RETRIES
-        body: dict = {"model": self._settings.llm_model, "messages": messages, "temperature": 0.2}
+        retries = MAX_RETRIES if max_retries is None else max(0, max_retries)
+        attempts = 1 + retries
+        body: dict = {
+            "model": self._settings.llm_model,
+            "messages": messages,
+            "temperature": getattr(self._settings, "llm_temperature", 0.55),
+        }
         reasoning = (self._settings.llm_reasoning_effort or "").strip().lower()
         if reasoning in {"none", "off", "disabled", "false"}:
             body["reasoning_effort"] = None
         elif reasoning:
             body["reasoning_effort"] = reasoning
-        if self._settings.llm_max_tokens:
-            body["max_tokens"] = self._settings.llm_max_tokens
+        token_limit = (
+            max_tokens
+            if max_tokens is not None
+            else self._settings.llm_max_tokens
+        )
+        if token_limit:
+            body["max_tokens"] = token_limit
         if self._settings.llm_use_json_mode:
             body["response_format"] = {"type": "json_object"}
         url = self._chat_url()
@@ -95,9 +111,17 @@ class LlmClient:
             details=str(last_error) if last_error else None,
         )
 
-    async def generate(self, messages: list[dict]) -> tuple[str, int, dict]:
+    async def generate(
+        self,
+        messages: list[dict],
+        *,
+        max_tokens: int | None = None,
+        max_retries: int | None = None,
+    ) -> tuple[str, int, dict]:
         started = time.monotonic()
-        resp = await self._chat(messages)
+        resp = await self._chat(
+            messages, max_tokens=max_tokens, max_retries=max_retries
+        )
         payload = resp.json()
         try:
             content = payload["choices"][0]["message"]["content"] or ""

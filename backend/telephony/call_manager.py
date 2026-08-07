@@ -42,17 +42,22 @@ FALLBACK_MESSAGES = {
     "greeting": {
         "en": GREETING,
         "hi": "नमस्ते! मैं आपकी मदद के लिए यहाँ हूँ. शुरू करने के लिए, क्या मैं आपका नाम पूछ सकता हूँ?",
-        "gu": "નમસ્તે! હું તમારી મદદ માટે અહીં છું. શરૂ કરવા માટે, તમારું નામ પૂછી શકું?",
+        "gu": "હેલો! હું તમારી મદદ માટે વાત કરું છું. શરૂ કરીએ, તમારું નામ શું છે?",
     },
     "repeat": {
         "en": REPEAT_MESSAGE,
         "hi": "माफ़ कीजिए, मैं समझ नहीं पाया. क्या आप दोबारा कह सकते हैं?",
-        "gu": "માફ કરશો, હું સમજી શક્યો નહીં. શું તમે ફરીથી કહી શકશો?",
+        "gu": "સોરી, સમજાયું નહીં. ફરી એક વાર કહો તો?",
     },
-    "goodbye": {
+        "goodbye": {
         "en": GOODBYE,
         "hi": "समय देने के लिए धन्यवाद. आपकी जानकारी सुरक्षित हो गई है. यह कॉल समाप्त हो रही है. नमस्ते!",
-        "gu": "સમય આપવા બદલ આભાર. તમારી વિગતો સાચવી લીધી છે. આ કૉલ સમાપ્ત થાય છે. આવજો!",
+        "gu": "ટાઈમ આપ્યો તેનો આભાર. તમારી વિગતો સેવ થઈ ગઈ છે. આવજો!",
+    },
+    "hold": {
+        "en": "One moment.",
+        "hi": "एक सेकंड।",
+        "gu": "એક સેકન્ડ.",
     },
 }
 
@@ -85,6 +90,15 @@ class CallRecord:
     updated_at: float = field(default_factory=time.time)
 
 
+ACTIVE_CALL_STATUSES = {
+    "queued",
+    "initiated",
+    "ringing",
+    "answered",
+    "in-progress",
+}
+
+
 class CallRegistry:
     """In-memory registry of active/recent calls (single-user MVP grade)."""
 
@@ -107,6 +121,14 @@ class CallRegistry:
 
     def remove(self, call_sid: str) -> None:
         self._calls.pop(call_sid, None)
+
+    def active_calls(self) -> list[CallRecord]:
+        """Calls that are still ringing or connected (not terminal)."""
+        return [
+            record
+            for record in self._calls.values()
+            if (record.status or "").lower() in ACTIVE_CALL_STATUSES
+        ]
 
 
 class CallSession:

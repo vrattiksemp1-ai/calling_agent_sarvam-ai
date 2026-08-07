@@ -32,8 +32,14 @@ const els = {
   callNumber: $("call-number"),
   callNumberCustom: $("call-number-custom"),
   callBtn: $("call-btn"),
+  hangupBtn: $("hangup-btn"),
   callStatus: $("call-status"),
 };
+
+const ACTIVE_CALL_STATUSES = new Set(["queued", "initiated", "ringing", "answered", "in-progress"]);
+const TERMINAL_CALL_STATUSES = new Set([
+  "completed", "busy", "failed", "no-answer", "canceled", "cancelled",
+]);
 
 const state = {
   sessionId: null,
@@ -50,6 +56,9 @@ const state = {
   audio: null,
   totalCost: 0,
   callTrialMode: true,
+  activeCallSid: null,
+  placingCall: false,
+  pollTimer: null,
 };
 
 /* ---------- helpers ---------- */
@@ -164,7 +173,12 @@ function debugLog(obj) {
 }
 
 async function api(url, options) {
-  const resp = await fetch(url, options);
+  const opts = options ? { ...options } : {};
+  const headers = new Headers(opts.headers || {});
+  // Free ngrok serves an interstitial HTML page to browsers unless skipped.
+  headers.set("ngrok-skip-browser-warning", "true");
+  opts.headers = headers;
+  const resp = await fetch(url, opts);
   let payload = null;
   try { payload = await resp.json(); } catch (_) { /* non-JSON */ }
   if (!resp.ok) {
@@ -460,7 +474,30 @@ async function initCallPicker() {
   }
 }
 
+function setCallControls(active) {
+  els.callBtn.disabled = !!active || state.placingCall;
+  if (els.hangupBtn) els.hangupBtn.disabled = !active;
+  if (els.callNumber) els.callNumber.disabled = !!active;
+  if (els.callNumberCustom) els.callNumberCustom.disabled = !!active;
+}
+
+function clearCallPoll() {
+  if (state.pollTimer) {
+    clearTimeout(state.pollTimer);
+    state.pollTimer = null;
+  }
+}
+
+function endActiveCallUi(message) {
+  clearCallPoll();
+  state.activeCallSid = null;
+  state.placingCall = false;
+  setCallControls(false);
+  if (message) els.callStatus.textContent = message;
+}
+
 async function placeCall() {
+  if (state.placingCall || state.activeCallSid) return;
   const number = (els.callNumber.value || els.callNumberCustom.value || "").trim();
   if (!number) {
     showError(state.callTrialMode
@@ -469,7 +506,8 @@ async function placeCall() {
     return;
   }
   clearError();
-  els.callBtn.disabled = true;
+  state.placingCall = true;
+  setCallControls(true);
   els.callStatus.textContent = "Placing call…";
   try {
     const data = await api("/api/calls", {
@@ -477,28 +515,51 @@ async function placeCall() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ to: number }),
     });
+    state.activeCallSid = data.call_sid;
+    state.placingCall = false;
+    setCallControls(true);
     els.callStatus.textContent = "Calling " + number + " — answer your phone and talk to the agent.";
     pollCallStatus(data.call_sid, number);
   } catch (err) {
-    els.callStatus.textContent = "";
+    endActiveCallUi("");
     showError(err.message);
-  } finally {
-    els.callBtn.disabled = false;
+  }
+}
+
+async function hangUpCall() {
+  const sid = state.activeCallSid;
+  if (!sid) return;
+  clearError();
+  els.hangupBtn.disabled = true;
+  els.callStatus.textContent = "Hanging up…";
+  try {
+    await api(`/api/calls/${sid}`, { method: "DELETE" });
+    endActiveCallUi("Call hung up.");
+  } catch (err) {
+    endActiveCallUi("Call ended.");
+    showError(err.message);
   }
 }
 
 async function pollCallStatus(callSid, number) {
+  if (state.activeCallSid !== callSid) return;
   try {
     const data = await api(`/api/calls/${callSid}`);
-    const status = data.status;
-    if (status === "completed" || status === "failed") {
-      els.callStatus.textContent = "Call to " + number + ": " + status + ".";
+    if (state.activeCallSid !== callSid) return;
+    const status = (data.status || "").toLowerCase();
+    if (data.error || TERMINAL_CALL_STATUSES.has(status)) {
+      const detail = data.error ? status + " (" + data.error + ")" : status;
+      endActiveCallUi("Call to " + number + ": " + detail + ".");
       return;
     }
-    els.callStatus.textContent = "Call " + status + " — the agent will speak when you answer.";
-    setTimeout(() => pollCallStatus(callSid, number), 2000);
+    if (ACTIVE_CALL_STATUSES.has(status)) {
+      els.callStatus.textContent = "Call " + status + " — talk when the agent greets you.";
+      state.pollTimer = setTimeout(() => pollCallStatus(callSid, number), 2000);
+      return;
+    }
+    endActiveCallUi("Call to " + number + ": " + (status || "ended") + ".");
   } catch (_) {
-    els.callStatus.textContent = "Call ended.";
+    endActiveCallUi("Call ended.");
   }
 }
 
@@ -512,6 +573,7 @@ els.exportJsonBtn.addEventListener("click", () => exportLead("json"));
 els.exportCsvBtn.addEventListener("click", () => exportLead("csv"));
 els.stopAudioBtn.addEventListener("click", stopAudio);
 els.callBtn.addEventListener("click", placeCall);
+if (els.hangupBtn) els.hangupBtn.addEventListener("click", hangUpCall);
 els.callNumber.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); placeCall(); } });
 els.callNumberCustom.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); placeCall(); } });
 

@@ -1,5 +1,6 @@
 """FastAPI application entry point for the Sarvam Cloud Lead Agent."""
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -42,11 +43,22 @@ def build_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        yield
-        for client_name in ("sarvam_client", "llm_client", "twilio_client"):
-            client = getattr(app.state, client_name, None)
-            if client is not None and hasattr(client, "aclose"):
-                await client.aclose()
+        # Pre-build the greeting TwiML in the background so the first /twiml
+        # webhook (Twilio's ~15s budget) is served from cache, not from a slow
+        # synchronous LLM + TTS call.
+        startup_tasks: list[asyncio.Task] = []
+        startup_tasks.append(asyncio.create_task(app.state.turn_flow.warm_greeting()))
+        try:
+            yield
+        finally:
+            for task in startup_tasks:
+                task.cancel()
+            if startup_tasks:
+                await asyncio.gather(*startup_tasks, return_exceptions=True)
+            for client_name in ("sarvam_client", "llm_client", "twilio_client"):
+                client = getattr(app.state, client_name, None)
+                if client is not None and hasattr(client, "aclose"):
+                    await client.aclose()
 
     app = FastAPI(
         title=settings.app_name,

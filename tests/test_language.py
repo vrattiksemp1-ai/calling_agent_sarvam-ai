@@ -69,8 +69,8 @@ async def test_process_turn_keeps_default_language(tmp_path):
 
 
 def test_fallback_text_is_language_aware():
-    assert "નમસ્તે" in fallback_text("greeting", "gu")
-    assert "નમસ્તે" in fallback_text("greeting", "gu-in")
+    assert "હેલો" in fallback_text("greeting", "gu")
+    assert "હેલો" in fallback_text("greeting", "gu-in")
     assert "माफ़" in fallback_text("repeat", "hi")
     assert "thank" in fallback_text("goodbye", "en").lower()
     assert "I'm sorry" in fallback_text("repeat", None)
@@ -116,28 +116,130 @@ def test_system_prompt_has_human_language_and_hangup_rules():
     assert "TONE AND EMOTION" in prompt
     assert "CLARIFICATION" in prompt
     assert "ENDING THE CALL" in prompt
-    assert "switches language mid-conversation" in prompt
+    assert "Keep the caller ENGAGED" in prompt
+    assert "Stay in ONE language for the whole turn" in prompt
+    assert "Follow the caller's LATEST message language" in prompt
+    assert "Explicit switch phrases must be obeyed immediately" in prompt
     assert "Never ask again for a field" in prompt
     assert "abandoned" in prompt
     assert "warm, professional" in prompt
     assert "natural spoken fillers" in prompt
     assert "overly chummy" in prompt
-    assert "everyday spoken Gujarati" in prompt
+    assert "EVERYDAY SPOKEN phone Gujarati" in prompt
     assert "decide by INTENT, not by matching words" in prompt
     assert "preferred_contact_time" in prompt
-    assert "FULL SENTENCE = LANGUAGE SWITCH" in prompt
-    assert "English spoken in Devanagari script" in prompt
+    assert "read it" in prompt and "confirmation" in prompt
     assert "NEVER ask a question and then disconnect in the same turn" in prompt
+    assert "Write for the VOICE engine" in prompt
+    assert "opening/greeting" in prompt
+    assert "do NOT introduce" in prompt
 
 
-def test_detect_utterance_language_removed_no_hardcoded_lists():
+def test_script_language_inference_no_word_lists():
     import backend.language_utils as lu
 
     assert hasattr(lu, "map_stt_language_code")
+    assert hasattr(lu, "infer_script_language")
+    assert hasattr(lu, "resolve_turn_language")
+    assert hasattr(lu, "detect_explicit_language_switch")
     assert not hasattr(lu, "detect_utterance_language")
     assert not hasattr(lu, "GUJARATI_ROMAN_MARKERS")
     assert not hasattr(lu, "HINDI_ROMAN_MARKERS")
     assert not hasattr(lu, "ENGLISH_WORDS")
+    assert lu.infer_script_language("મારે એક ટૂલ જોઈએ છે") == "gu"
+    assert lu.infer_script_language("मेरा नाम राहुल है") == "hi"
+    assert lu.infer_script_language("hello there") is None
+    assert lu.detect_explicit_language_switch("english mein baat karo") == "en"
+    assert lu.detect_explicit_language_switch("gujarati ma bolo") == "gu"
+    assert (
+        lu.resolve_turn_language(
+            "Currently we are using spreadsheets.",
+            prior_language="gu",
+        )
+        == "en"
+    )
+    assert (
+        lu.resolve_turn_language(
+            "english please speak english",
+            prior_language="gu",
+        )
+        == "en"
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_turn_switches_when_model_detects_english_on_indic_asr(tmp_path):
+    """English spoken through Gujarati-script ASR should be allowed to switch."""
+    from backend.database import create_engine_and_session
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return structured_json(
+            "Hello! What kind of tool do you need?",
+            detected_language="en",
+            extracted_fields={},
+            next_state="collecting_identity",
+        )
+
+    settings = make_settings(tmp_path)
+    llm = make_mock_llm_client(settings, handler)
+    _, factory = create_engine_and_session(
+        f"sqlite:///{str(tmp_path / 'gu_script.db').replace(chr(92), '/')}"
+    )
+    with factory() as db:
+        session = Session(language="gu")
+        db.add(session)
+        db.commit()
+        session_id = session.id
+    engine = ConversationEngine(llm)
+    with factory() as db:
+        session = db.get(Session, session_id)
+        _, parsed = await engine.process_turn(
+            db,
+            session,
+            'મારે એક ઓટો મશીન ટૂલ બનાવવું છે',
+            TurnTimings(),
+        )
+        db.commit()
+        assert parsed.detected_language == "en"
+        assert session.language == "en"
+
+
+@pytest.mark.asyncio
+async def test_process_turn_fallback_when_model_claims_gu_but_writes_english(tmp_path):
+    from backend.database import create_engine_and_session
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return structured_json(
+            "Hello! What kind of tool do you need?",
+            detected_language="gu",
+            extracted_fields={},
+            next_state="collecting_identity",
+        )
+
+    settings = make_settings(tmp_path)
+    llm = make_mock_llm_client(settings, handler)
+    _, factory = create_engine_and_session(
+        f"sqlite:///{str(tmp_path / 'gu_fallback.db').replace(chr(92), '/')}"
+    )
+    with factory() as db:
+        session = Session(language="gu")
+        db.add(session)
+        db.commit()
+        session_id = session.id
+    engine = ConversationEngine(llm)
+    with factory() as db:
+        session = db.get(Session, session_id)
+        _, parsed = await engine.process_turn(
+            db,
+            session,
+            'મારે એક ઓટો મશીન ટૂલ બનાવવું છે',
+            TurnTimings(),
+        )
+        db.commit()
+        assert parsed.detected_language == "gu"
+        assert session.language == "gu"
+        assert "સોરી" in parsed.assistant_message or "માફ" in parsed.assistant_message or "ફરી" in parsed.assistant_message
+
 
 
 @pytest.mark.asyncio
@@ -176,7 +278,7 @@ async def test_process_turn_agent_decides_when_no_stt_language(tmp_path):
         for m in captured["payload"]["messages"]
         if m["role"] == "system"
     )
-    assert "The caller speaks" not in system
+    assert "The caller speaks English. Reply entirely in English." in system
     with factory() as db:
         assert db.get(Session, session.id).language == "en"
 

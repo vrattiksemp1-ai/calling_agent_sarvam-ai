@@ -311,7 +311,10 @@ def test_twilio_service_turn_callback_prefers_signature():
     assert service.validate_turn_callback(url, params, sig, "")
     # a wrong token is irrelevant when the signature is valid
     assert service.validate_turn_callback(url, params, sig, "bogus")
-    assert not service.validate_turn_callback(url, params, "bogus-sig", "secret123")
+    # Behind ngrok, Redirect callbacks may carry a mismatched signature; a
+    # valid shared-secret token is still accepted so the call does not drop.
+    assert service.validate_turn_callback(url, params, "bogus-sig", "secret123")
+    assert not service.validate_turn_callback(url, params, "bogus-sig", "wrong")
 
 
 def test_twilio_service_turn_callback_token_when_unsigned():
@@ -338,8 +341,35 @@ def test_call_registry_crud():
     reg.add(rec)
     reg.update("CA1", status="in-progress")
     assert reg.get("CA1").status == "in-progress"
+    assert reg.active_calls() == [rec]
+    reg.update("CA1", status="completed")
+    assert reg.active_calls() == []
     reg.remove("CA1")
     assert reg.get("CA1") is None
+
+
+def test_place_call_supersedes_active_call(client):
+    """A second place-call hangs up any still-active registry call first."""
+    first = client.post("/api/calls", json={"to": "+919876543210"})
+    assert first.status_code == 200
+    first_sid = first.json()["call_sid"]
+    # Simulate answered/in-progress so the next place treats it as active.
+    client.app.state.call_registry.update(first_sid, status="in-progress")
+
+    second = client.post("/api/calls", json={"to": "+919876543210"})
+    assert second.status_code == 200
+    second_sid = second.json()["call_sid"]
+    assert second_sid != first_sid
+
+    prior = client.app.state.call_registry.get(first_sid)
+    assert prior is not None
+    assert prior.status == "completed"
+    assert prior.error == "superseded"
+    assert first_sid in client.app.state.twilio_client._client.calls.updated
+
+    active = client.app.state.call_registry.active_calls()
+    assert len(active) == 1
+    assert active[0].call_sid == second_sid
 
 
 # ---------- call routes ----------
@@ -455,6 +485,113 @@ def test_twiml_endpoint(client):
     assert "api/calls/turn" in resp.text
     assert "<Play>" in resp.text
     assert "<Stream" not in resp.text
+
+
+def test_twiml_seeds_greeting_so_first_turn_does_not_regreet(tmp_path):
+    """Opening audio is persisted; first user reply must continue, not re-intro."""
+    import json
+
+    settings = make_settings(
+        tmp_path,
+        default_language="gu",
+        sarvam_api_key="x",
+        llm_api_key="x",
+        twilio_account_sid="AC123",
+        twilio_auth_token="tok",
+        twilio_phone_number="+15005550006",
+        public_base_url="https://x.ngrok-free.app",
+        twilio_trial_mode=True,
+        twilio_test_phone_number="+917048211715",
+    )
+
+    greeting_text = "હેલો, હું વ્રત્તિક્સ થી બોલું છું. તમે શું શોધી રહ્યા છો?"
+
+    def greeting_then_continue(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content or b"{}")
+        messages = payload.get("messages", [])
+        has_user = any(
+            m.get("role") == "user"
+            and not (m.get("content") or "").startswith("\n\nCurrent state:")
+            and not (m.get("content") or "").startswith("\n\nYour previous reply")
+            for m in messages
+        )
+        if not has_user:
+            return structured_json(
+                greeting_text,
+                extracted_fields={},
+                next_state="collecting_identity",
+                detected_language="gu",
+            )
+        history = " ".join(m.get("content", "") for m in messages)
+        assert greeting_text in history
+        return structured_json(
+            "સરસ, ઓટોમેશન માટે. તમારું નામ શું છે?",
+            extracted_fields={"product_or_service_interest": "automation"},
+            next_state="collecting_identity",
+            detected_language="gu",
+        )
+
+    app = build_app(
+        settings,
+        sarvam_client=make_mock_sarvam_client(settings, sarvam_handler),
+        llm_client=make_mock_llm_client(settings, greeting_then_continue),
+        twilio_client=make_mock_twilio_client(settings),
+    )
+    with TestClient(app) as c:
+        twiml = c.post("/api/calls/twiml", data={"CallSid": "CA-seed-1"})
+        assert twiml.status_code == 200
+        assert "<Play>" in twiml.text
+
+        record = app.state.call_registry.get("CA-seed-1")
+        assert record is not None
+        assert record.session_id
+
+        from backend.database import session_scope
+        from backend.models import Message, Session
+
+        with session_scope(app.state.session_factory) as db:
+            session = db.get(Session, record.session_id)
+            assert session is not None
+            assert session.current_state == "collecting_identity"
+            msgs = (
+                db.query(Message)
+                .filter(Message.session_id == session.id)
+                .order_by(Message.id)
+                .all()
+            )
+            assert len(msgs) == 1
+            assert msgs[0].role == "assistant"
+            assert greeting_text in msgs[0].content
+
+        from twilio.request_validator import RequestValidator
+
+        url = "https://x.ngrok-free.app/api/calls/turn"
+        params = {
+            "CallSid": "CA-seed-1",
+            "SpeechResult": "ઓટોમેશન જોઈએ છે",
+        }
+        sig = RequestValidator("tok").compute_signature(url, params)
+        turn = c.post(
+            "/api/calls/turn",
+            data=params,
+            headers={"X-Twilio-Signature": sig},
+        )
+        assert turn.status_code == 200
+        assert "<Gather" in turn.text
+
+        with session_scope(app.state.session_factory) as db:
+            msgs = (
+                db.query(Message)
+                .filter(Message.session_id == record.session_id)
+                .order_by(Message.id)
+                .all()
+            )
+            assert len(msgs) >= 3  # greeting + user + reply
+            assert msgs[0].role == "assistant"
+            assert msgs[1].role == "user"
+            assert msgs[2].role == "assistant"
+            assert "ઓટોમેશન" in msgs[2].content
+            assert "વ્રત્તિક્સ થી બોલું" not in msgs[2].content
 
 
 def test_twiml_endpoint_gather_language_gujarati(tmp_path):
@@ -574,12 +711,15 @@ def test_turn_twiml_action_url_contains_token(tmp_path):
     assert 'action="https://x.ngrok-free.app/api/calls/turn?turn_token=turn-secret-123#ct=10000&amp;rt=15000&amp;tt=15000&amp;rc=3&amp;rp=ct,5xx"' in resp.text
 
 
-def test_turn_webhook_empty_speech_reprompts(client):
+def test_turn_webhook_empty_speech_silent_relisten(client):
+    """Blank SpeechResult must re-open Gather without speaking 'I'm sorry'."""
     resp = _signed_turn_post(client, "")
     assert resp.status_code == 200
     assert "<Gather" in resp.text
-    assert "<Play>" in resp.text
+    assert "<Say>" not in resp.text
+    assert "<Play>" not in resp.text
     assert "<Hangup" not in resp.text
+    assert 'timeout="5"' in resp.text
     assert "api/calls/turn" in resp.text
 
 
@@ -684,6 +824,49 @@ def test_turn_webhook_gather_language_follows_session(tmp_path):
     assert 'language="gu-IN"' in resp.text
     assert "<Gather" in resp.text
     assert "<Hangup" not in resp.text
+
+
+def test_turn_webhook_defers_with_redirect_when_slow(tmp_path, monkeypatch):
+    """Slow LLM+TTS must Redirect instead of blowing Twilio's ~15s budget."""
+    import asyncio
+
+    from backend.telephony import turn_flow as turn_flow_mod
+
+    monkeypatch.setattr(turn_flow_mod, "TURN_INLINE_BUDGET_SECONDS", 0.05)
+
+    original_build = turn_flow_mod.TurnFlow._build_turn_twiml
+
+    async def slow_build(self, call_sid, text, pending=None):
+        await asyncio.sleep(0.2)
+        return await original_build(self, call_sid, text, pending)
+
+    monkeypatch.setattr(turn_flow_mod.TurnFlow, "_build_turn_twiml", slow_build)
+
+    client = _turn_app(tmp_path)
+    resp = _token_turn_post(client, "my name is rahul", call_sid="CA-slow-1")
+    assert resp.status_code == 200
+    assert "<Redirect" in resp.text
+    assert "/api/calls/turn-result" in resp.text
+    assert "pending=" in resp.text
+    assert "<Pause" in resp.text
+    assert "<Say>" not in resp.text
+
+    # Follow the redirect URL path (strip public base + fragment).
+    import re
+    from urllib.parse import urlparse, parse_qs
+
+    match = re.search(r"<Redirect[^>]*>([^<]+)</Redirect>", resp.text)
+    assert match
+    redirect = match.group(1).replace("&amp;", "&")
+    parsed = urlparse(redirect)
+    qs = parse_qs(parsed.query)
+    result = client.post(
+        parsed.path + "?" + parsed.query.split("#")[0],
+        data={"CallSid": "CA-slow-1"},
+    )
+    assert result.status_code == 200
+    assert "<Gather" in result.text or "<Hangup" in result.text
+    assert qs.get("pending")
 
 
 def _signed_status_post(client, sid, status, token="token-test"):

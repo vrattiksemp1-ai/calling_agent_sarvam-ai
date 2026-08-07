@@ -71,10 +71,15 @@ class FakeCalls:
         self.updated: list[str] = []
 
     def create(self, to, from_, url=None, status_callback=None, status_callback_event=None):
-        self.created.append(
-            {"to": to, "from_": from_, "url": url, "status_callback": status_callback}
+        sid = (
+            "CA-test-call-sid"
+            if not self.created
+            else f"CA-test-call-sid-{len(self.created) + 1}"
         )
-        return FakeCallInstance(sid="CA-test-call-sid", status="queued", to=to, from_=from_)
+        self.created.append(
+            {"to": to, "from_": from_, "url": url, "status_callback": status_callback, "sid": sid}
+        )
+        return FakeCallInstance(sid=sid, status="queued", to=to, from_=from_)
 
     def __call__(self, sid):
         self.updated.append(sid)
