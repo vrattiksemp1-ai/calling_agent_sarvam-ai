@@ -154,6 +154,23 @@ class Settings(BaseSettings):
     business_name: str = "Vrattiks"
     business_description: str = "a technology and software company focused on building AI-powered solutions for businesses and individuals."
 
+    # BDE outbound persona + call facts (see config/call_profile.json).
+    agent_name: str = "Shivangi"
+    call_profile_path: str = "config/call_profile.json"
+    # Optional JSON array/string override for products; empty keeps file values.
+    business_products: str = ""
+    contact_source_channel: str = ""
+    contact_source_detail: str = ""
+    default_lead_full_name: str = ""
+    default_lead_company_name: str = ""
+    default_lead_job_title: str = ""
+    default_lead_city: str = ""
+    default_lead_business_type: str = ""
+    default_lead_field_note: str = ""
+    default_lead_additional_notes: str = ""
+    # Soft AI disclosure in opening (keeps compliance; wording still BDE-like).
+    disclose_ai_assistant: bool = True
+
     retain_audio: bool = False
     rate_limit_enabled: bool = True
     rate_limit_per_minute: int = 60

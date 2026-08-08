@@ -94,6 +94,9 @@ def build_app(
         app.state.llm_client,
         business_name=settings.business_name,
         business_description=settings.business_description,
+        agent_name=settings.agent_name,
+        disclose_ai_assistant=settings.disclose_ai_assistant,
+        settings=settings,
     )
     app.state.rate_limiter = RateLimiter(
         enabled=settings.rate_limit_enabled,

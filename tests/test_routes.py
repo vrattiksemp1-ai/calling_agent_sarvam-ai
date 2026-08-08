@@ -42,9 +42,10 @@ def test_create_session(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["session_id"]
-    assert body["current_state"] == "greeting"
+    assert body["current_state"] in {"greeting", "collecting_identity"}
     assert "greeting" in body
     assert "AI assistant" in body["greeting"]
+    assert "Shivangi" in body["greeting"] or "minutes" in body["greeting"].lower()
     assert body["audio_base64"]
     assert body["audio_mime"]
 

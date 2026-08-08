@@ -1,0 +1,326 @@
+"""Outbound BDE call profile: agent persona, products, contact source, lead.
+
+Loaded from config/call_profile.json (or CALL_PROFILE_PATH), with Settings /
+per-call overrides. Facts are injected into the LLM; spoken wording is never
+hard-coded one-liners.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+from backend.config import PROJECT_ROOT, Settings
+
+DEFAULT_PROFILE_PATH = PROJECT_ROOT / "config" / "call_profile.json"
+
+
+@dataclass
+class ProductOffering:
+    name: str
+    summary: str = ""
+
+
+@dataclass
+class ContactSource:
+    channel: str = ""
+    detail: str = ""
+
+
+@dataclass
+class LeadProfile:
+    full_name: str = ""
+    company_name: str = ""
+    job_title: str = ""
+    city: str = ""
+    business_type: str = ""
+    field_note: str = ""
+    additional_notes: str = ""
+    phone_number: str = ""
+
+    def as_lead_fields(self) -> dict[str, str]:
+        """Map known lead facts onto Lead columns (skip empties)."""
+        mapping = {
+            "full_name": self.full_name,
+            "company_name": self.company_name,
+            "job_title": self.job_title,
+            "city": self.city,
+            "business_type": self.business_type,
+            "phone_number": self.phone_number,
+            "additional_notes": self.additional_notes,
+        }
+        return {k: v.strip() for k, v in mapping.items() if (v or "").strip()}
+
+
+@dataclass
+class CallProfile:
+    agent_name: str = "Shivangi"
+    business_name: str = "Vrattiks"
+    business_description: str = (
+        "a technology and software company focused on building AI-powered "
+        "solutions for businesses and individuals."
+    )
+    products_and_services: list[ProductOffering] = field(default_factory=list)
+    contact_source: ContactSource = field(default_factory=ContactSource)
+    lead: LeadProfile = field(default_factory=LeadProfile)
+
+    def to_prompt_context(self) -> str:
+        """Human-readable facts block for the system/user prompt."""
+        products = self.products_and_services or []
+        if products:
+            product_lines = "\n".join(
+                f"  - {p.name}: {p.summary}".rstrip(": ") for p in products
+            )
+        else:
+            product_lines = "  - (not configured; speak only at a high level about the company)"
+
+        source_channel = (self.contact_source.channel or "").strip()
+        source_detail = (self.contact_source.detail or "").strip()
+        if source_channel or source_detail:
+            source_block = (
+                f"  channel: {source_channel or '(unspecified)'}\n"
+                f"  detail: {source_detail or '(unspecified)'}"
+            )
+        else:
+            source_block = (
+                "  (not configured — if asked how you got the number, answer "
+                "gracefully like a real BDE without inventing a fake story)"
+            )
+
+        lead = self.lead
+        lead_lines = []
+        for label, value in (
+            ("full_name", lead.full_name),
+            ("company_name", lead.company_name),
+            ("job_title", lead.job_title),
+            ("city", lead.city),
+            ("business_type", lead.business_type),
+            ("field_note", lead.field_note),
+            ("additional_notes", lead.additional_notes),
+            ("phone_number", lead.phone_number),
+        ):
+            if (value or "").strip():
+                lead_lines.append(f"  {label}: {value.strip()}")
+        lead_block = (
+            "\n".join(lead_lines)
+            if lead_lines
+            else "  (no prefilled lead details — ask for name and handle missing info gracefully)"
+        )
+
+        return (
+            "CALL PROFILE (internal facts — paraphrase naturally; do not read as a script):\n"
+            f"- Agent name: {self.agent_name}\n"
+            f"- Company: {self.business_name} — {self.business_description}\n"
+            f"- Products and services:\n{product_lines}\n"
+            f"- Contact source facts (ONLY use if the caller asks how you got their number):\n"
+            f"{source_block}\n"
+            f"- Known about this contact:\n{lead_block}\n"
+        )
+
+    def opening_greeting(self, language: str | None = None) -> str:
+        """LAST-RESORT emergency opening only when the LLM greeting fails.
+
+        Normal calls must use ConversationEngine.generate_greeting so wording
+        varies each time. This only packs required facts into a randomly
+        chosen shell — never the primary spoken path.
+        """
+        import random
+
+        name = (self.agent_name or "Shivangi").strip()
+        company = (self.business_name or "our company").strip()
+        contact = (self.lead.full_name or "").strip()
+        lang = (language or "en").strip().lower()
+
+        # Keep emergency shells short and fact-based. Wording is randomly
+        # chosen so even the fallback is not one frozen sentence forever.
+        if lang.startswith("hi") or lang == "hinglish":
+            if contact:
+                variants = [
+                    f"Namaste, kya {contact}? Main {name}, {company} se AI assistant. Do minute milenge?",
+                    f"Hello {contact} ji, {name} bol rahi hoon {company} se AI assistant. Abhi time hai?",
+                ]
+            else:
+                variants = [
+                    f"Namaste, main {name} bol rahi hoon, {company} se AI assistant. Abhi do minute hain?",
+                    f"Hello, {name} yahan se, {company} ki AI assistant. Thodi baat ho sakti hai?",
+                    f"Namaskar, mera naam {name} hai, {company} se AI assistant. Time hai kya abhi?",
+                ]
+            return random.choice(variants)
+
+        if lang.startswith("gu") or lang == "gujlish":
+            if contact:
+                variants = [
+                    f"Hello, {contact}? Hu {name}, {company} ni AI assistant. Be minute male?",
+                    f"Namaste {contact}, {name} bolu chu {company} thi AI assistant. Hamanah time che?",
+                ]
+            else:
+                variants = [
+                    f"Hello, hu {name} bolu chu, {company} ni AI assistant. Hamanah be minute che?",
+                    f"Namaste, {name} ahinthi, {company} ni AI assistant. Hamanah vaat thai shake?",
+                    f"Hi, maru naam {name} che, {company} taraphthi AI assistant. Time che hamanah?",
+                ]
+            return random.choice(variants)
+
+        if contact:
+            variants = [
+                f"Hi, am I speaking with {contact}? This is {name}, an AI assistant from {company}. Do you have a minute?",
+                f"Hello {contact}, {name} here — AI assistant from {company}. Is now a good time?",
+            ]
+        else:
+            variants = [
+                f"Hi, this is {name}, an AI assistant from {company}. Do you have a couple of minutes right now?",
+                f"Hello, {name} here from {company} — I'm an AI assistant. Got two minutes to talk?",
+                f"Hi there, I'm {name}, an AI assistant calling from {company}. Is now a good time for a quick chat?",
+            ]
+        return random.choice(variants)
+
+
+def _as_dict(raw: Any) -> dict[str, Any]:
+    return raw if isinstance(raw, dict) else {}
+
+
+def _parse_products(raw: Any) -> list[ProductOffering]:
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return [ProductOffering(name="Offerings", summary=raw.strip())]
+    if not isinstance(raw, list):
+        return []
+    products: list[ProductOffering] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            products.append(ProductOffering(name=item.strip()))
+        elif isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            summary = str(item.get("summary") or item.get("pitch") or "").strip()
+            if name:
+                products.append(ProductOffering(name=name, summary=summary))
+    return products
+
+
+def load_call_profile_file(path: Path | None = None) -> dict[str, Any]:
+    profile_path = path or DEFAULT_PROFILE_PATH
+    if not profile_path.is_file():
+        return {}
+    try:
+        data = json.loads(profile_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def build_call_profile(
+    settings: Settings,
+    *,
+    lead_overrides: dict[str, Any] | None = None,
+    phone_number: str | None = None,
+) -> CallProfile:
+    """Merge JSON profile + Settings + optional per-call lead overrides."""
+    path = Path(settings.call_profile_path) if settings.call_profile_path else DEFAULT_PROFILE_PATH
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    file_data = load_call_profile_file(path)
+
+    agent_name = (
+        (settings.agent_name or "").strip()
+        or str(file_data.get("agent_name") or "").strip()
+        or "Shivangi"
+    )
+    business_name = (
+        (settings.business_name or "").strip()
+        or str(file_data.get("business_name") or "").strip()
+        or "Vrattiks"
+    )
+    business_description = (
+        (settings.business_description or "").strip()
+        or str(file_data.get("business_description") or "").strip()
+    )
+
+    products = _parse_products(file_data.get("products_and_services"))
+    if settings.business_products.strip():
+        products = _parse_products(settings.business_products) or products
+
+    src_file = _as_dict(file_data.get("contact_source"))
+    contact_source = ContactSource(
+        channel=(
+            (settings.contact_source_channel or "").strip()
+            or str(src_file.get("channel") or "").strip()
+        ),
+        detail=(
+            (settings.contact_source_detail or "").strip()
+            or str(src_file.get("detail") or "").strip()
+        ),
+    )
+
+    lead_file = _as_dict(file_data.get("lead"))
+    overrides = lead_overrides or {}
+    lead = LeadProfile(
+        full_name=str(
+            overrides.get("full_name")
+            or settings.default_lead_full_name
+            or lead_file.get("full_name")
+            or ""
+        ).strip(),
+        company_name=str(
+            overrides.get("company_name")
+            or settings.default_lead_company_name
+            or lead_file.get("company_name")
+            or ""
+        ).strip(),
+        job_title=str(
+            overrides.get("job_title")
+            or settings.default_lead_job_title
+            or lead_file.get("job_title")
+            or ""
+        ).strip(),
+        city=str(
+            overrides.get("city")
+            or settings.default_lead_city
+            or lead_file.get("city")
+            or ""
+        ).strip(),
+        business_type=str(
+            overrides.get("business_type")
+            or settings.default_lead_business_type
+            or lead_file.get("business_type")
+            or ""
+        ).strip(),
+        field_note=str(
+            overrides.get("field_note")
+            or settings.default_lead_field_note
+            or lead_file.get("field_note")
+            or ""
+        ).strip(),
+        additional_notes=str(
+            overrides.get("additional_notes")
+            or settings.default_lead_additional_notes
+            or lead_file.get("additional_notes")
+            or ""
+        ).strip(),
+        phone_number=str(
+            phone_number
+            or overrides.get("phone_number")
+            or lead_file.get("phone_number")
+            or ""
+        ).strip(),
+    )
+
+    return CallProfile(
+        agent_name=agent_name,
+        business_name=business_name,
+        business_description=business_description
+        or (
+            "a technology and software company focused on building AI-powered "
+            "solutions for businesses and individuals."
+        ),
+        products_and_services=products,
+        contact_source=contact_source,
+        lead=lead,
+    )
+
+
+def profile_as_dict(profile: CallProfile) -> dict[str, Any]:
+    return asdict(profile)

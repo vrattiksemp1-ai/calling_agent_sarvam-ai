@@ -189,9 +189,19 @@ def lead_llm_handler(request: httpx.Request) -> httpx.Response:
     payload = json.loads(request.content or b"{}")
     messages = payload.get("messages", [])
     system = next((m["content"] for m in messages if m["role"] == "system"), "")
+    state_blob = " ".join(
+        (m.get("content") or "") for m in messages if m.get("role") == "user"
+    ).lower()
     lower = user_utterance(messages).lower()
 
     extracted, next_state, msg = {}, "", ""
+    if "current state: greeting" in state_blob and not lower.strip():
+        return structured_json(
+            "Hi, this is Shivangi, an AI assistant from Vrattiks. "
+            "Do you have a couple of minutes right now?",
+            extracted_fields={},
+            next_state="collecting_identity",
+        )
     if "name is rahul" in lower or "i am rahul" in lower:
         extracted = {"full_name": "Rahul Sharma"}
         next_state = "collecting_contact"

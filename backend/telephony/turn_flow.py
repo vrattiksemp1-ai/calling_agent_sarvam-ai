@@ -31,7 +31,8 @@ from backend.conversation import ConversationEngine
 from backend.database import session_scope
 from backend.errors import AppError
 from backend.metrics import TurnTimings, persist_turn_telemetry
-from backend.models import Message, Session
+from backend.call_profile import build_call_profile
+from backend.models import Lead, Message, Session
 from backend.providers.sarvam_client import SarvamClient
 from backend.telephony.call_manager import (
     CallRecord,
@@ -433,10 +434,10 @@ class TurnFlow:
             # Cold-start race only: a greeting is being generated, so serve the
             # static fallback instead of blocking the webhook on the LLM.
             logger.warning("Greeting still generating; serving static fallback.")
-            text = fallback_text("greeting", lang)
+            text = fallback_text("greeting", lang, settings=self._settings)
             # Avoid Twilio <Say> on Indic script - use English for this rare path.
             say_text = (
-                text if lang in {"en", "en-in", "en-IN"} else fallback_text("greeting", "en")
+                text if lang in {"en", "en-in", "en-IN"} else fallback_text("greeting", "en", settings=self._settings)
             )
             self._seed_greeting_session(call_sid, text, lang)
             return self._gather_twiml(None, say_text, language=lang)
@@ -448,7 +449,7 @@ class TurnFlow:
                 return twiml
             twiml = await self._build_and_cache_greeting(lang)
             entry = self._greeting_cache.get(lang)
-            text = entry[2] if entry else fallback_text("greeting", lang)
+            text = entry[2] if entry else fallback_text("greeting", lang, settings=self._settings)
             self._seed_greeting_session(call_sid, text, lang)
             return twiml
 
@@ -481,6 +482,17 @@ class TurnFlow:
                     content=greeting_text.strip(),
                 )
             )
+            profile = build_call_profile(
+                self._settings,
+                lead_overrides=record.lead_overrides,
+                phone_number=record.to_number or None,
+            )
+            self._engine.set_call_profile(profile)
+            lead = Lead(session_id=session.id)
+            self._engine.apply_known_lead_fields(lead)
+            if record.to_number and not lead.phone_number:
+                lead.phone_number = record.to_number
+            db.add(lead)
             self._registry.update(call_sid, session_id=session.id)
             logger.info(
                 "Seeded greeting session %s for call %s", session.id, call_sid
@@ -502,7 +514,7 @@ class TurnFlow:
 
     async def _build_and_cache_greeting(self, lang: str) -> str:
         timings = TurnTimings(settings=self._settings)
-        text = fallback_text("greeting", lang)
+        text = fallback_text("greeting", lang, settings=self._settings)
         try:
             greeting, _, _ = await self._engine.generate_greeting(timings, language=lang)
             if greeting and greeting.strip():
@@ -515,7 +527,7 @@ class TurnFlow:
         say_fallback = (
             text
             if (url is not None or lang in {"en", "en-in", "en-IN"})
-            else fallback_text("greeting", "en")
+            else fallback_text("greeting", "en", settings=self._settings)
         )
         content = self._gather_twiml(
             url, say_fallback if url is None else None, language=lang

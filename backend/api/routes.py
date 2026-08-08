@@ -14,7 +14,7 @@ from backend.database import session_scope
 from backend.errors import LeadNotFoundError, SessionNotFoundError, TtsError
 from backend.exports import lead_to_csv_bytes, lead_to_json_bytes
 from backend.metrics import TurnTimings
-from backend.models import Lead, Message, Session
+from backend.models import LEAD_FIELDS, Lead, Message, Session
 from backend.providers.sarvam_client import SarvamClient
 from backend.schemas import (
     ConfirmRequest,
@@ -137,10 +137,20 @@ async def provider_status(request: Request) -> ProviderStatus:
 async def create_session(request: Request):
     settings: Settings = request.app.state.settings
     sarvam: SarvamClient = request.app.state.sarvam_client
-    greeting = (
-        f"Hi! I'm an AI assistant from {settings.business_name}, calling to "
-        "understand what you need. May I ask your name first?"
-    )
+    engine: ConversationEngine = request.app.state.conversation_engine
+    # Primary path: LLM-generated opening (varies every call). Emergency
+    # profile shell is used only if the LLM greeting fails.
+    try:
+        from backend.metrics import TurnTimings
+
+        greeting, _, _ = await engine.generate_greeting(
+            TurnTimings(settings=settings),
+            language=settings.default_language,
+        )
+        if not (greeting or "").strip():
+            raise ValueError("empty LLM greeting")
+    except Exception:
+        greeting = engine.call_profile.opening_greeting(settings.default_language)
     audio_base64: str | None = None
     audio_mime: str | None = None
     warning: str | None = None
@@ -150,10 +160,23 @@ async def create_session(request: Request):
     except Exception:
         warning = "Speech synthesis failed; the greeting is shown as text."
     with session_scope(request.app.state.session_factory) as db:
-        session = Session(language=settings.default_language)
+        session = Session(
+            language=settings.default_language,
+            current_state="collecting_identity",
+        )
         db.add(session)
         db.flush()
-        engine: ConversationEngine = request.app.state.conversation_engine
+        db.add(
+            Message(
+                session_id=session.id,
+                role="assistant",
+                content=greeting,
+            )
+        )
+        lead = Lead(session_id=session.id)
+        engine.apply_known_lead_fields(lead)
+        db.add(lead)
+        db.flush()
         return {
             "session_id": session.id,
             "status": session.status,
@@ -164,7 +187,7 @@ async def create_session(request: Request):
             "audio_base64": audio_base64,
             "audio_mime": audio_mime,
             "warning": warning,
-            "lead": engine.to_lead_out(None, session).model_dump(),
+            "lead": engine.to_lead_out(lead, session).model_dump(),
         }
 
 
@@ -390,9 +413,17 @@ def reset_session(request: Request, session_id: str) -> dict:
         session.skipped_fields = []
         lead = session.lead
         if lead is not None:
-            for col in lead.__table__.columns.keys():
-                if col not in {"id", "session_id"}:
-                    setattr(lead, col, None)
+            for name in LEAD_FIELDS:
+                setattr(lead, name, None)
+            lead.qualification_score = 0
+            lead.qualification_level = "cold"
+            lead.missing_important_fields = []
+            lead.recommended_next_action = ""
+            lead.conversation_status = "in_progress"
+            lead.consent_confirmed = False
+            lead.summary_confirmed = False
+            lead.raw_json = {}
+            engine.apply_known_lead_fields(lead)
         db.query(Message).filter(Message.session_id == session_id).delete()
         db.add(session)
         return {

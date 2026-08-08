@@ -27,8 +27,8 @@ async def test_generate_greeting_returns_llm_text(tmp_path):
     settings = make_settings(tmp_path)
     engine = ConversationEngine(make_mock_llm_client(settings, _greeting_handler()))
     text, latency, usage = await engine.generate_greeting(TurnTimings(settings=settings))
-    assert text.startswith("I'm an AI assistant")
-    assert text.endswith("Hi there! Lovely day. May I have your name?")
+    # LLM wording is returned as-is (no hardcoded prefix stitching).
+    assert text == "Hi there! Lovely day. May I have your name?"
     assert latency >= 0
     assert isinstance(usage, dict)
 
@@ -86,8 +86,8 @@ async def test_generate_greeting_injects_language_instruction(tmp_path):
         if m["role"] == "system"
     )
     assert "Gujarati" in system
-    assert "AI assistant" in text
-    assert text.endswith("કેમ છો? તમારું નામ શું છે?")
+    # No hardcoded AI prefix stitching — LLM text is kept as returned.
+    assert text == "કેમ છો? તમારું નામ શું છે?"
 
 
 @pytest.mark.asyncio
@@ -144,13 +144,13 @@ async def test_generate_greeting_injects_business_identity(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_generate_greeting_without_business_has_no_brand(tmp_path):
+async def test_generate_greeting_default_persona_is_shivangi(tmp_path):
     captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["payload"] = json.loads(request.content)
         return structured_json(
-            "Hello! What can I help you with?",
+            "Hello! Do you have a minute?",
             extracted_fields={},
             next_state="collecting_identity",
         )
@@ -163,4 +163,6 @@ async def test_generate_greeting_without_business_has_no_brand(tmp_path):
         for m in captured["payload"]["messages"]
         if m["role"] == "system"
     )
-    assert "BUSINESS" not in system
+    assert "Shivangi" in system
+    assert "BUSINESS" in system
+    assert "CALL PROFILE" in system

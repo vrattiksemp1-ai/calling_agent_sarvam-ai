@@ -39,11 +39,27 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/calls", tags=["calls"])
 
 
+class LeadOverrideIn(BaseModel):
+    """Optional per-call contact facts (merged over config/call_profile.json)."""
+
+    full_name: str | None = None
+    company_name: str | None = None
+    job_title: str | None = None
+    city: str | None = None
+    business_type: str | None = None
+    field_note: str | None = None
+    additional_notes: str | None = None
+
+
 class PlaceCallRequest(BaseModel):
     to: str = Field(..., description="Destination phone number in E.164 format, e.g. +919876543210")
     provider: Literal["twilio", "exotel"] | None = Field(
         default=None,
         description="Optional carrier override; omitted requests preserve the configured default.",
+    )
+    lead: LeadOverrideIn | None = Field(
+        default=None,
+        description="Optional contact personalization for this outbound call.",
     )
 
 
@@ -121,6 +137,20 @@ async def place_call(request: Request, body: PlaceCallRequest) -> CallStatusOut:
         await _call_service(request, prior.provider).complete_call(prior.call_sid)
         registry.update(prior.call_sid, status="completed", error="superseded")
 
+    lead_overrides = (
+        {k: v for k, v in body.lead.model_dump().items() if v}
+        if body.lead is not None
+        else None
+    )
+    from backend.call_profile import build_call_profile
+
+    profile = build_call_profile(
+        settings,
+        lead_overrides=lead_overrides,
+        phone_number=to,
+    )
+    request.app.state.conversation_engine.set_call_profile(profile)
+
     result = await service.start_call(to)
     record = CallRecord(
         call_sid=result.call_sid,
@@ -128,6 +158,7 @@ async def place_call(request: Request, body: PlaceCallRequest) -> CallStatusOut:
         from_number=result.from_,
         provider=provider,
         status=result.status,
+        lead_overrides=lead_overrides,
     )
     registry.add(record)
     logger.info("Call registered: %s", result.call_sid)

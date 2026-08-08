@@ -45,46 +45,65 @@ from backend.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-GREETING = (
-    "Hi! I'm an AI assistant calling from Vrattiks to understand what you need. "
-    "May I ask your name first?"
-)
-REPEAT_MESSAGE = "I'm sorry, I didn't catch that. Could you say that again?"
-GOODBYE = "Thank you for your time. Your details are saved and this call is ending. Goodbye!"
-
-# Language-aware fallbacks used when LLM generation or streaming fails.
-FALLBACK_MESSAGES = {
-    "greeting": {
-        "en": GREETING,
-        "hi": "नमस्ते! मैं Vrattiks की AI assistant हूँ और आपकी ज़रूरत समझने के लिए कॉल कर रही हूँ. आपका नाम क्या है?",
-        "gu": "હેલો! હું Vrattiksની AI assistant છું અને તમને શું જોઈએ છે એ સમજવા કૉલ કર્યો છે. તમારું નામ શું છે?",
-    },
-    "repeat": {
-        "en": REPEAT_MESSAGE,
-        "hi": "माफ़ कीजिए, मैं समझ नहीं पाया. क्या आप दोबारा कह सकते हैं?",
-        "gu": "સોરી, સમજાયું નહીં. ફરી એક વાર કહો તો?",
-    },
-        "goodbye": {
-        "en": GOODBYE,
-        "hi": "समय देने के लिए धन्यवाद. आपकी जानकारी सुरक्षित हो गई है. यह कॉल समाप्त हो रही है. नमस्ते!",
-        "gu": "ટાઈમ આપ્યો તેનો આભાર. તમારી વિગતો સેવ થઈ ગઈ છે. આવજો!",
-    },
-    "hold": {
-        "en": "One moment.",
-        "hi": "एक सेकंड।",
-        "gu": "એક સેકન્ડ.",
-    },
-}
+# Emergency-only lines when LLM/STT fails. Normal conversation wording is
+# always LLM-generated from the call profile. Each key has multiple variants.
+FALLBACK_MESSAGES = {'repeat': {'en': ["Sorry, I didn't catch that. Could you say that again?",
+                   'I missed that — mind repeating in a few words?',
+                   'Could you please repeat that?'],
+            'hi': ['माफ़ कीजिए, मैं समझ नहीं पाया. क्या आप दोबारा कह सकते हैं?',
+                   'सुनाई नहीं दिया — थोड़े शब्दों में दोबारा बोलेंगे?',
+                   'एक बार फिर कह सकते हैं क्या?'],
+            'gu': ['સોરી, સમજાયું નહીં. ફરી એક વાર કહો તો?',
+                   'સંભળાયું નહીં — ટૂંકમાં ફરી કહો?',
+                   'ફરી એક વાર કહી શકો?']},
+ 'goodbye': {'en': ['Thank you for your time. Your details are saved. Goodbye!',
+                    "Thanks for talking — I've noted your details. Bye for now!",
+                    "Appreciate your time. We'll take it from here. Goodbye!"],
+             'hi': ['समय देने के लिए धन्यवाद. आपकी जानकारी सुरक्षित हो गई है. नमस्ते!',
+                    'बात करने के लिए शुक्रिया. डिटेल्स सेव हो गई हैं. अलविदा!',
+                    'धन्यवाद. हम आगे बढ़ते हैं. नमस्ते!'],
+             'gu': ['ટાઈમ આપ્યો તેનો આભાર. તમારી વિગતો સેવ થઈ ગઈ છે. આવજો!',
+                    'વાત કરવા બદલ આભાર. ડિટેલ્સ નોંધી લીધી. આવજો!',
+                    'ટાઈમ આપ્યો એટલે આભાર. અમે આગળ વધીશું. આવજો!']},
+ 'hold': {'en': ['One moment.', 'Just a second.', 'Hang on a moment.'],
+          'hi': ['एक सेकंड।', 'ज़रा रुकिए।', 'एक पल।'],
+          'gu': ['એક સેકન્ડ.', 'જરા રોકો.', 'એક પળ.']}}
 
 
-def fallback_text(name: str, language: str | None) -> str:
-    """Pick the fallback message for a language code (gu/hi -> localized)."""
+
+
+def fallback_text(
+    name: str,
+    language: str | None,
+    *,
+    settings=None,
+    call_profile=None,
+) -> str:
+    """Emergency fallback only — random variant, never the primary script."""
+    import random
+
     lang = (language or "en").strip().lower()
-    if lang in {"gu", "gu-in", "gujarati", "gujlish"}:
-        return FALLBACK_MESSAGES[name]["gu"]
-    if lang in {"hi", "hi-in", "hinglish"}:
-        return FALLBACK_MESSAGES[name]["hi"]
-    return FALLBACK_MESSAGES[name]["en"]
+    if name == "greeting":
+        if call_profile is not None:
+            return call_profile.opening_greeting(lang)
+        if settings is not None:
+            from backend.call_profile import build_call_profile
+
+            return build_call_profile(settings).opening_greeting(lang)
+        from backend.call_profile import CallProfile
+
+        return CallProfile().opening_greeting(lang)
+    bucket = (
+        "gu"
+        if lang in {"gu", "gu-in", "gujarati", "gujlish"}
+        else "hi"
+        if lang in {"hi", "hi-in", "hinglish"}
+        else "en"
+    )
+    options = FALLBACK_MESSAGES[name][bucket]
+    if isinstance(options, list):
+        return random.choice(options)
+    return options
 
 # VAD tuning (all in 20 ms mu-law chunks = 160 samples each)
 SPEECH_ENERGY = 500
@@ -103,6 +122,7 @@ class CallRecord:
     status: str = "initiated"
     error: str | None = None
     session_id: str | None = None
+    lead_overrides: dict | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -874,16 +894,46 @@ class CallSession:
             )
         if self._call_sid:
             self._registry.update(self._call_sid, status="in-progress")
+        greeting = ""
+        try:
+            from backend.metrics import TurnTimings
+
+            greeting, _, _ = await self._engine.generate_greeting(
+                TurnTimings(settings=self._settings),
+                language=self._settings.default_language,
+            )
+        except Exception:  # noqa: BLE001 - emergency shell if LLM unavailable
+            logger.warning("LLM greeting failed; using emergency profile shell")
+        if not (greeting or "").strip():
+            greeting = fallback_text(
+                "greeting",
+                self._settings.default_language,
+                settings=self._settings,
+                call_profile=getattr(self._engine, "call_profile", None),
+            )
         await self._replace_response(
-            self._speak(fallback_text("greeting", self._settings.default_language)),
+            self._speak(greeting),
             label="greeting",
         )
 
     async def _create_session(self) -> str:
+        from backend.models import Lead
+
         with session_scope(self._factory) as db:
-            session = Session(language=self._settings.default_language)
+            session = Session(
+                language=self._settings.default_language,
+                current_state="collecting_identity",
+            )
             db.add(session)
             db.flush()
+            lead = Lead(session_id=session.id)
+            if hasattr(self._engine, "apply_known_lead_fields"):
+                self._engine.apply_known_lead_fields(lead)
+            record = self._registry.get(self._call_sid) if self._call_sid else None
+            phone = (record.to_number if record else "") or ""
+            if phone and not lead.phone_number:
+                lead.phone_number = phone
+            db.add(lead)
             session_id = session.id
         if self._call_sid:
             self._registry.update(self._call_sid, session_id=session_id)

@@ -11,6 +11,8 @@ from collections.abc import Awaitable, Callable
 from sqlalchemy.orm import Session as OrmSession
 
 from backend import prompts, scoring, state_machine, validation
+from backend.call_profile import CallProfile, build_call_profile
+from backend.config import Settings
 from backend.errors import LlmStructuredOutputError
 from backend.llm_parsing import (
     SAFE_FALLBACK_MESSAGE,
@@ -50,31 +52,88 @@ class ConversationEngine:
         llm_client: LlmClient,
         business_name: str | None = None,
         business_description: str | None = None,
+        *,
+        call_profile: CallProfile | None = None,
+        agent_name: str | None = None,
+        disclose_ai_assistant: bool = True,
+        settings: Settings | None = None,
     ):
         self._llm = llm_client
-        self._business_name = business_name
-        self._business_description = business_description
+        self._settings = settings
+        self._disclose_ai_assistant = disclose_ai_assistant
+        if call_profile is not None:
+            self._call_profile = call_profile
+        elif settings is not None:
+            self._call_profile = build_call_profile(settings)
+        else:
+            self._call_profile = CallProfile(
+                agent_name=agent_name or "Shivangi",
+                business_name=business_name or "Vrattiks",
+                business_description=business_description
+                or (
+                    "a technology and software company focused on building "
+                    "AI-powered solutions for businesses and individuals."
+                ),
+            )
+        self._business_name = (
+            business_name or self._call_profile.business_name or "Vrattiks"
+        )
+        self._business_description = (
+            business_description or self._call_profile.business_description
+        )
+        self._agent_name = agent_name or self._call_profile.agent_name or "Shivangi"
+
+    @property
+    def call_profile(self) -> CallProfile:
+        return self._call_profile
+
+    def set_call_profile(self, profile: CallProfile) -> None:
+        """Swap active profile (e.g. per-call lead overrides)."""
+        self._call_profile = profile
+        self._business_name = profile.business_name
+        self._business_description = profile.business_description
+        self._agent_name = profile.agent_name
+
+    def _prompt_kwargs(self) -> dict:
+        return {
+            "business_name": self._business_name,
+            "business_description": self._business_description,
+            "agent_name": self._agent_name,
+            "disclose_ai_assistant": self._disclose_ai_assistant,
+            "call_profile": self._call_profile,
+        }
 
     def _lead_fields(self, lead: Lead | None) -> dict[str, str]:
         if lead is None:
             return {}
         return {name: (getattr(lead, name) or "") for name in LEAD_FIELDS}
 
-    def _ensure_ai_greeting(self, text: str, language: str | None) -> str:
-        """Guarantee disclosure even when a provider ignores the prompt."""
-        if not text:
-            return ""
-        if "ai assistant" in (text or "").casefold():
-            return text
-        business = self._business_name or "the company"
-        lang = (language or "en").strip().lower()
-        if lang.startswith("gu"):
-            prefix = f"હું {business}ની AI assistant છું; "
-        elif lang.startswith("hi") or lang == "hinglish":
-            prefix = f"मैं {business} की AI assistant हूँ; "
-        else:
-            prefix = f"I'm an AI assistant from {business}; "
-        return prefix + (text or "").lstrip()
+    def apply_known_lead_fields(self, lead: Lead, extra: dict[str, str] | None = None) -> None:
+        """Prefill Lead columns from call profile / overrides without overwriting."""
+        known = self._call_profile.lead.as_lead_fields()
+        if extra:
+            known.update({k: v for k, v in extra.items() if (v or "").strip()})
+        for name, value in known.items():
+            if name not in LEAD_FIELDS:
+                continue
+            current = getattr(lead, name, None)
+            if not current and value:
+                setattr(lead, name, value)
+        if (self._call_profile.lead.field_note or "").strip():
+            note = self._call_profile.lead.field_note.strip()
+            existing = (lead.additional_notes or "").strip()
+            marker = f"field_note: {note}"
+            if marker not in existing:
+                lead.additional_notes = f"{existing}; {marker}".strip("; ")
+
+    def _normalize_greeting(self, text: str, language: str | None = None) -> str:
+        """Return LLM greeting as-spoken. No hardcoded script prefixes.
+
+        Persona / AI disclosure / time-check are enforced by the prompt +
+        CALL PROFILE facts, not by stitching fixed sentences here.
+        """
+        del language  # kept for call-site compatibility
+        return (text or "").strip()
 
     @staticmethod
     def _reply_language_mismatch(reply: str, expected: str) -> bool:
@@ -162,9 +221,8 @@ class ConversationEngine:
                 session.current_state,
                 repair=False,
                 language=language,
-                business_name=self._business_name,
-                business_description=self._business_description,
                 style_signal=style_signal,
+                **self._prompt_kwargs(),
             )
             parser = AssistantMessageStreamParser()
             raw_parts: list[str] = []
@@ -217,9 +275,8 @@ class ConversationEngine:
                 session.current_state,
                 repair=repair,
                 language=language,
-                business_name=self._business_name,
-                business_description=self._business_description,
                 style_signal=style_signal,
+                **self._prompt_kwargs(),
             )
             # Phone turns need one fast shot: no provider retries, short replies.
             raw, latency, usage = await self._llm.generate(
@@ -265,9 +322,13 @@ class ConversationEngine:
                 timings.repair_count += 1
             timings.llm_attempt_count += 1
             messages = prompts.build_messages(
-                [], {}, [], "greeting", repair=repair, language=language,
-                business_name=self._business_name,
-                business_description=self._business_description,
+                [],
+                self._call_profile.lead.as_lead_fields(),
+                [],
+                "greeting",
+                repair=repair,
+                language=language,
+                **self._prompt_kwargs(),
             )
             raw, latency, usage = await self._llm.generate(
                 messages,
@@ -288,7 +349,7 @@ class ConversationEngine:
                 details=error,
             )
         return (
-            self._ensure_ai_greeting(parsed.assistant_message or "", language),
+            self._normalize_greeting(parsed.assistant_message or "", language),
             timings.llm_latency_ms or 0,
             timings.llm_usage or {},
         )
@@ -310,6 +371,7 @@ class ConversationEngine:
         lead = session.lead
         if lead is None:
             lead = Lead(session_id=session.id)
+            self.apply_known_lead_fields(lead)
             db.add(lead)
             db.flush()
 

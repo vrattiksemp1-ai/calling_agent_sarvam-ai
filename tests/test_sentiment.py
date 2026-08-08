@@ -91,10 +91,10 @@ async def test_style_signal_does_not_change_lead_extraction(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_generated_greeting_always_discloses_ai(tmp_path):
+async def test_generated_greeting_keeps_llm_wording(tmp_path):
     def handler(request: httpx.Request) -> httpx.Response:
         return structured_json(
-            "Hello, may I ask your name?",
+            "Hello from Vrattiks — got a minute?",
             next_state="collecting_identity",
         )
 
@@ -108,5 +108,5 @@ async def test_generated_greeting_always_discloses_ai(tmp_path):
         greeting, _, _ = await engine.generate_greeting(
             TurnTimings(settings=settings), language=language
         )
-        assert "AI assistant" in greeting
-        assert "Vrattiks" in greeting
+        # Engine must not stitch a hardcoded AI prefix over the LLM line.
+        assert greeting == "Hello from Vrattiks — got a minute?"

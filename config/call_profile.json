@@ -1,0 +1,28 @@
+{
+  "agent_name": "Shivangi",
+  "business_name": "Vrattiks",
+  "business_description": "a technology and software company focused on building AI-powered solutions for businesses and individuals.",
+  "products_and_services": [
+    {
+      "name": "AI voice calling assistant",
+      "summary": "Automated phone conversations that can qualify interest, answer common questions, and book follow-ups."
+    },
+    {
+      "name": "Custom AI solutions",
+      "summary": "Tailored workflows for sales, support, and operations based on how your team already works."
+    }
+  ],
+  "contact_source": {
+    "channel": "google",
+    "detail": "Came across the contact while researching businesses in their field online."
+  },
+  "lead": {
+    "full_name": "",
+    "company_name": "",
+    "job_title": "",
+    "city": "",
+    "business_type": "",
+    "field_note": "",
+    "additional_notes": ""
+  }
+}
