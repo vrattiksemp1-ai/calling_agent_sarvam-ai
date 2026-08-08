@@ -61,7 +61,18 @@ def transition_allowed(current: str, next_state: str, fields: dict[str, str | No
         return TransitionResult(current, True, "")
 
     if next_state in PIPELINE and current in PIPELINE:
-        return TransitionResult(next_state, True, "")
+        # Forward (or same-stage) only — never rewind the sales pipeline.
+        # Rewinds caused loops like collecting_contact → collecting_identity
+        # after a JSON repair, which made the agent re-ask for name/time.
+        cur_idx = PIPELINE.index(current)
+        nxt_idx = PIPELINE.index(next_state)
+        if nxt_idx >= cur_idx:
+            return TransitionResult(next_state, True, "")
+        return TransitionResult(
+            current,
+            False,
+            f"Cannot move backward from {current} to {next_state}.",
+        )
 
     if next_state == "requesting_consent":
         if not completion_basics_met(fields):

@@ -254,12 +254,26 @@ class TwilioService:
                 return list(cached)
 
         numbers = self._configured_verified_numbers()
-        if self.configured:
+        # When .env already lists verified destinations, skip OutgoingCallerIds.
+        # Some trial/API keys return 401 for that endpoint even though Calls work.
+        if numbers:
+            self._verified_cache = (time.monotonic(), list(numbers))
+            return list(numbers)
+
+        if self.configured and not getattr(self, "_verified_api_disabled", False):
             try:
                 await asyncio.to_thread(self._fetch_verified_numbers, numbers)
-            except Exception:
-                # API unavailable -> keep the env list; nothing to leak.
-                logger.warning("Could not refresh verified numbers from Twilio")
+            except Exception as exc:  # noqa: BLE001 - SDK raises several types
+                status = getattr(exc, "status", None)
+                code = getattr(exc, "code", None)
+                if status == 401 or code == 20003 or "20003" in str(exc):
+                    self._verified_api_disabled = True
+                    logger.warning(
+                        "Twilio OutgoingCallerIds unauthorized; "
+                        "using TWILIO_VERIFIED_NUMBERS / TWILIO_TEST_PHONE_NUMBER only"
+                    )
+                else:
+                    logger.warning("Could not refresh verified numbers from Twilio")
 
         self._verified_cache = (time.monotonic(), list(numbers))
         return list(numbers)

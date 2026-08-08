@@ -132,7 +132,8 @@ def test_system_prompt_has_human_language_and_hangup_rules():
     assert "EVERYDAY SPOKEN phone Gujarati" in prompt
     assert "decide by INTENT, not by matching words" in prompt
     assert "preferred_contact_time" in prompt
-    assert "read it" in prompt and "confirmation" in prompt
+    assert "Name capture is mandatory" in prompt
+    assert "acknowledge" in prompt
     assert "NEVER ask a question and then disconnect in the same turn" in prompt
     assert "Write for the VOICE engine" in prompt
     assert "opening/greeting" in prompt
@@ -169,6 +170,16 @@ def test_script_language_inference_no_word_lists():
         )
         == "en"
     )
+    # Gujarati-script ASR of "speaking English" must switch immediately.
+    assert lu.detect_explicit_language_switch("સ્પીકિંગ ઇંગલિશ") == "en"
+    assert (
+        lu.resolve_turn_language(
+            "સ્પીકિંગ ઇંગલિશ",
+            prior_language="gu",
+        )
+        == "en"
+    )
+    assert lu.detect_explicit_language_switch("can we speak in english") == "en"
 
 
 @pytest.mark.asyncio

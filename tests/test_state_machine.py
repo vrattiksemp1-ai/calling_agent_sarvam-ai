@@ -9,13 +9,14 @@ def test_all_states_valid():
         assert is_valid_state(state)
 
 
-def test_pipeline_forward_and_back():
+def test_pipeline_forward_not_backward():
     fields = {"full_name": "Rahul", "phone_number": "9876543210",
               "business_requirement": "need crm", "consent_to_contact": "yes"}
     r = transition_allowed("collecting_identity", "collecting_contact", fields)
     assert r.allowed
     r = transition_allowed("collecting_contact", "collecting_identity", fields)
-    assert r.allowed
+    assert not r.allowed
+    assert r.state == "collecting_contact"
 
 
 def test_greeting_only_advances_to_identity():

@@ -43,6 +43,8 @@ def extract_json(text: str) -> dict:
     except json.JSONDecodeError:
         candidate = _extract_first_object(cleaned)
         if candidate is None:
+            candidate = _salvage_truncated_object(cleaned)
+        if candidate is None:
             return {}
         try:
             data = json.loads(candidate)
@@ -78,6 +80,50 @@ def _extract_first_object(text: str) -> str | None:
             if depth == 0:
                 return text[start : i + 1]
     return None
+
+
+def _salvage_truncated_object(text: str) -> str | None:
+    """Close a truncated JSON object that still has assistant_message.
+
+    Phone turns sometimes hit max_tokens mid-object (e.g. cut after
+    ``\"conversation_complete\": true,``). Closing braces lets us avoid a
+    full repair round-trip that thrashs next_state.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    fragment = text[start:].rstrip()
+    if '"assistant_message"' not in fragment:
+        return None
+    # Close an open string if we were cut mid-value.
+    in_string = False
+    escape = False
+    for ch in fragment:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+    if in_string:
+        fragment += '"'
+    fragment = fragment.rstrip().rstrip(",")
+    # Ensure required bool keys exist with safe defaults.
+    if '"conversation_complete"' not in fragment:
+        fragment += ', "conversation_complete": false'
+    elif fragment.rstrip().endswith(":"):
+        fragment += " false"
+    if '"needs_confirmation"' not in fragment:
+        fragment += ', "needs_confirmation": false'
+    opens = fragment.count("{") - fragment.count("}")
+    if opens <= 0:
+        return None
+    fragment += "}" * opens
+    return fragment
 
 
 def parse_structured_response(text: str) -> LLMStructuredResponse | None:

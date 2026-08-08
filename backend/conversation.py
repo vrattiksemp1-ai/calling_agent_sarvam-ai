@@ -5,6 +5,7 @@ handling, deterministic scoring and completion criteria. The LLM only supplies
 wording and field extraction; the backend controls everything structural.
 """
 
+import re
 from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable
 
@@ -28,6 +29,7 @@ from backend.models import (
     Session,
 )
 from backend.language_utils import (
+    detect_explicit_language_switch,
     infer_script_language,
     resolve_turn_language,
 )
@@ -42,9 +44,244 @@ from backend.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+_NAME_PATTERNS = (
+    re.compile(
+        r"(?:my\s+name\s+is|i\s+am|i'm|this\s+is)\s+([A-Za-z][A-Za-z.'\-]{1,40})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:માય\s*નેમ\s*ઇસ|મારું\s*નામ|મારુ\s*નામ)\s*([^\s,?.!]{2,40})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:मेरा\s*नाम|मेरा\s*नेम)\s*(?:है\s*)?([^\s,?.!]{2,40})",
+        re.IGNORECASE,
+    ),
+)
+_AVAIL_YES = re.compile(
+    r"\b(yes|yeah|yep|sure|ok|okay|haan|haa|હા|हां|બોલો|bolo)\b",
+    re.IGNORECASE,
+)
+_SOURCE_Q = re.compile(
+    r"(where\s+are\s+you\s+calling|where\s+you\s+calling|where\s+do\s+you\s+work|where\s+from|કોલિંગ\s*સોંગ|કોલિંગ\s*ફ્રોમ|ક્યાંથી\s*ફોન|ક્યાં\s*કામ|कहां\s*से\s*कॉल|कहां\s*काम)",
+    re.IGNORECASE,
+)
+_SERVICE_Q = re.compile(
+    r"(service|services|product|products|provide|સર્વિસ|પ્રોવાઇડ|प्रोडक्ट|सेवा)",
+    re.IGNORECASE,
+)
+_INTRO_RE = re.compile(
+    r"(my name is|i'?m\s+\w+\s+from|હું\s+.+\s+છું|બોલું\s*છું|માંથી\s*.{0,24}\s*બોલ|do you have (a )?(moment|time|couple)|થોડો\s*સમય|થોડીવાર|થોડી\s*મિનિટ|વ્યસ્ત\s*છો|मेरा\s*नाम|बोल\s*रही|समय\s*है|व्यस्त)",
+    re.IGNORECASE,
+)
+_TIME_ASK_RE = re.compile(
+    r"(do you have|couple of minutes|few minutes|a moment|થોડી?\s*મિનિટ|થોડો\s*સમય|થોડીવાર|વ્યસ્ત\s*છો|समय\s*(है|हो)|व्यस्त)",
+    re.IGNORECASE,
+)
+_EMAIL_MENTION = re.compile(r"\b(email|e-mail|mail\s*id|ઇમેઇલ|ईमेल)\b", re.I)
+_REFUSE_MENTION = re.compile(
+    r"\b(no|not|don'?t|refuse|skip|nahi|ના|नहीं)\b", re.I
+)
+_ASKING_RE = re.compile(
+    r"(say\s+that\s+again|say\s+again|repeat\s+that|didn't\s+catch|"
+    r"સમજાયું\s*નહીં|ફરી\s*(એક\s*)?વાર|"
+    r"समझ\s*नहीं|दोबारा|"
+    r"કરી\s*શકું|कर\s*सकूं|shall\s+i|can\s+i\s+call)",
+    re.I,
+)
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def infer_full_name_from_text(text: str | None) -> str | None:
+    """Best-effort name salvage when the LLM forgets extracted_fields.full_name."""
+    if not text or not text.strip():
+        return None
+    for pattern in _NAME_PATTERNS:
+        match = pattern.search(text.strip())
+        if not match:
+            continue
+        name = (match.group(1) or "").strip(" .,!?:;\"'")
+        if len(name) < 2:
+            continue
+        # Drop trailing filler words from Gu/En ASR.
+        for stop in (" છે", " है", " chhe", " hai"):
+            if name.lower().endswith(stop.strip().lower()):
+                name = name[: -len(stop)].strip()
+        if name.lower() in {"yes", "no", "ok", "okay", "haan", "હા"}:
+            continue
+        return name
+    return None
+
+
+def looks_like_source_question(text: str | None) -> bool:
+    return bool(text and _SOURCE_Q.search(text))
+
+
+def looks_like_service_question(text: str | None) -> bool:
+    return bool(text and _SERVICE_Q.search(text))
+
+
+def looks_like_reintroduction(
+    text: str | None,
+    *,
+    agent_name: str = "",
+    business_name: str = "",
+) -> bool:
+    """True when the reply looks like a fresh opening / time-check restart."""
+    if not text or not text.strip():
+        return False
+    t = text.strip()
+    tl = t.lower()
+    agent = (agent_name or "").strip().lower()
+    biz = (business_name or "").strip().lower()
+    persona = False
+    if agent and agent in tl:
+        persona = True
+    if biz and biz in tl:
+        persona = True
+    if "ai assistant" in tl or "ai-powered" in tl:
+        persona = True
+    if re.search(
+        r"બોલું\s*છું|માંથી\s*.{0,40}\s*બોલ|ફોન\s*કરી\s*રહી|"
+        r"बोल\s*रही\s*हूँ|से\s*कॉल\s*कर|मेरा\s*नाम",
+        t,
+        re.IGNORECASE,
+    ):
+        persona = True
+    if not persona and not _INTRO_RE.search(t):
+        return False
+    if _TIME_ASK_RE.search(t):
+        return True
+    if persona and _INTRO_RE.search(t):
+        return True
+    return False
+
+
+def continuity_reply(
+    *,
+    language: str,
+    business_name: str,
+    full_name: str = "",
+    user_text: str | None = None,
+    abandoning: bool = False,
+) -> str:
+    """Deterministic spoken line when the model restarts or abandons badly."""
+    from backend.telephony.call_manager import fallback_text
+
+    lang = (language or "en").strip().lower()
+    if lang in {"gu", "gu-in", "gujarati", "gujlish"}:
+        lang = "gu"
+    elif lang in {"hi", "hi-in", "hinglish", "en-hi"}:
+        lang = "hi"
+    else:
+        lang = "en"
+
+    if abandoning:
+        return fallback_text("goodbye", lang)
+
+    biz = business_name or "our team"
+    name = (full_name or "").strip()
+
+    if looks_like_source_question(user_text):
+        if lang == "gu":
+            return (
+                f"હું {biz} થી ફોન કરી રહી છું. "
+                + ("તમારું નામ શું છે?" if not name else "આગળ વાત કરીએ?")
+            )
+        if lang == "hi":
+            return (
+                f"मैं {biz} से कॉल कर रही हूँ। "
+                + ("आपका नाम क्या है?" if not name else "आगे बढ़ें?")
+            )
+        return (
+            f"I'm calling from {biz}. "
+            + ("May I have your name?" if not name else "Shall we continue?")
+        )
+
+    if looks_like_service_question(user_text):
+        if lang == "gu":
+            return (
+                f"હા, {biz} AI સોલ્યુશન્સ અને કસ્ટમ સર્વિસ આપે છે. "
+                + (f"{name}, " if name else "")
+                + "તમને શું જોઈએ છે?"
+            )
+        if lang == "hi":
+            return (
+                f"हाँ, {biz} AI सॉल्यूशंस और कस्टम सर्विस देता है. "
+                + (f"{name}, " if name else "")
+                + "आपको क्या चाहिए?"
+            )
+        return (
+            f"Yes — {biz} offers AI solutions and custom services. "
+            + (f"{name}, " if name else "")
+            + "what are you looking for?"
+        )
+
+    if lang == "gu":
+        return f"સરસ{', ' + name if name else ''}! હું ટૂંકમાં આગળ કહું?"
+    if lang == "hi":
+        return f"बढ़िया{', ' + name if name else ''}! मैं आगे बताऊँ?"
+    return (
+        f"Great{', ' + name if name else ''}! "
+        "Shall I continue with a quick overview?"
+    )
+
+
+
+def build_progress_hints(
+    history: list[dict],
+    fields: dict,
+    user_text: str | None,
+    *,
+    agent_name: str,
+    business_name: str,
+) -> str:
+    """Deterministic reminders so the model does not restart the call."""
+    hints: list[str] = []
+    assistant_turns = [
+        m.get("content") or ""
+        for m in history
+        if m.get("role") == "assistant" and (m.get("content") or "").strip()
+    ]
+    user_turns = [
+        m.get("content") or ""
+        for m in history
+        if m.get("role") == "user" and (m.get("content") or "").strip()
+    ]
+    if assistant_turns:
+        hints.append(
+            f"You already introduced yourself as {agent_name} from {business_name}. "
+            "Do NOT introduce yourself or the company again. Do NOT restart the pitch."
+        )
+    # Availability already confirmed: first user turn after opening looks like yes.
+    if assistant_turns and any(_AVAIL_YES.search(u) for u in user_turns):
+        hints.append(
+            "Caller already confirmed they can talk now. "
+            "Do NOT ask again if they have time / a couple of minutes."
+        )
+    if (fields.get("full_name") or "").strip():
+        hints.append(
+            f"Caller's name is already known: {fields['full_name'].strip()}. "
+            "Use it; do not re-ask for name."
+        )
+    elif infer_full_name_from_text(user_text):
+        hints.append(
+            "Caller just gave their name in this utterance — set extracted_fields.full_name."
+        )
+    if looks_like_source_question(user_text):
+        hints.append(
+            f"Caller asked where you are calling from. Answer in FIRST PERSON briefly "
+            f"from {business_name} using CALL PROFILE source facts, then continue."
+        )
+    if detect_explicit_language_switch(user_text) == "en":
+        hints.append(
+            "Caller asked to speak English. Switch to English THIS turn and continue "
+            "the same call — do not re-introduce yourself."
+        )
+    return "\n".join(f"- {h}" for h in hints)
 
 
 class ConversationEngine:
@@ -182,13 +419,37 @@ class ConversationEngine:
         return script is None and latin >= 12
 
     def _apply_extraction(
-        self, db: OrmSession, lead: Lead, parsed, session: Session
+        self,
+        db: OrmSession,
+        lead: Lead,
+        parsed,
+        session: Session,
+        *,
+        user_text: str | None = None,
     ) -> None:
         skipped = list(session.skipped_fields or [])
+        extracted = dict(parsed.extracted_fields or {})
+
+        # Salvage name when the model spoke it but forgot extracted_fields.
+        if not (extracted.get("full_name") or getattr(lead, "full_name", None)):
+            inferred = infer_full_name_from_text(user_text)
+            if inferred:
+                extracted["full_name"] = inferred
+                parsed.extracted_fields = extracted
+
+        # Drop bogus email refusals (e.g. "call me later" mis-tagged as refuse email).
+        email_val = str(extracted.get("email") or "").strip().lower()
+        if email_val in {REFUSAL_TOKEN, "__refused__", "refused", "__skip__"}:
+            ut = user_text or ""
+            if not (_EMAIL_MENTION.search(ut) and _REFUSE_MENTION.search(ut)):
+                extracted.pop("email", None)
+                parsed.extracted_fields = extracted
+                logger.info("Dropped bogus email refusal from extraction")
+
         for name in parsed.fields_to_clear:
             if name in LEAD_FIELDS:
                 setattr(lead, name, None)
-        for name, raw_value in (parsed.extracted_fields or {}).items():
+        for name, raw_value in extracted.items():
             if name not in LEAD_FIELDS:
                 continue
             value = str(raw_value).strip()
@@ -247,6 +508,13 @@ class ConversationEngine:
         style_signal = rolling_transcript_style(history)
         compact = self._use_compact_prompt(timings)
         phone_kwargs = self._phone_llm_kwargs(timings)
+        progress_hints = build_progress_hints(
+            history,
+            self._lead_fields(lead),
+            user_text,
+            agent_name=self._call_profile.agent_name,
+            business_name=self._call_profile.business_name,
+        )
         if on_assistant_chunk is not None:
             timings.llm_attempt_count += 1
             messages = prompts.build_messages(
@@ -257,6 +525,7 @@ class ConversationEngine:
                 repair=False,
                 language=language,
                 style_signal=None if compact else style_signal,
+                progress_hints=progress_hints,
                 **self._prompt_kwargs(compact=compact),
             )
             parser = AssistantMessageStreamParser()
@@ -310,6 +579,7 @@ class ConversationEngine:
                 repair=repair,
                 language=language,
                 style_signal=None if compact else style_signal,
+                progress_hints=progress_hints,
                 **self._prompt_kwargs(compact=compact),
             )
             # Phone turns need one fast shot: no provider retries, short replies.
@@ -515,32 +785,79 @@ class ConversationEngine:
                 timings.language_repair = "localized_repeat_fallback"
                 timings.fallback_count += 1
 
-        # Soft anti-repeat: if the model pasted the previous assistant line,
-        # force a short clarification instead of playing the same audio again.
-        if history:
-            last_assistant = next(
-                (
-                    m["content"]
-                    for m in reversed(history)
-                    if m.get("role") == "assistant" and m.get("content")
-                ),
-                None,
+        # Continuity guards: no exact repeats, no re-intros, clean abandon audio.
+        prior_assistant = [
+            (m.get("content") or "").strip()
+            for m in history
+            if m.get("role") == "assistant" and (m.get("content") or "").strip()
+        ]
+        last_assistant = prior_assistant[-1] if prior_assistant else None
+        current = (parsed.assistant_message or "").strip()
+        lang = session.language or turn_language or "en"
+        biz = self._call_profile.business_name
+        agent = self._call_profile.agent_name
+        name_hint = (
+            (lead.full_name or "").strip()
+            or (infer_full_name_from_text(user_text) or "")
+        )
+        abandoning = (parsed.next_state or "").strip().lower() == "abandoned"
+
+        if prior_assistant and looks_like_source_question(user_text):
+            parsed.assistant_message = continuity_reply(
+                language=lang,
+                business_name=biz,
+                full_name=name_hint,
+                user_text=user_text,
             )
-            current = (parsed.assistant_message or "").strip()
-            if (
-                last_assistant
-                and current
-                and current == last_assistant.strip()
-            ):
+            current = parsed.assistant_message
+            logger.info("Forced first-person source answer")
+        elif prior_assistant and current and looks_like_reintroduction(
+            current, agent_name=agent, business_name=biz
+        ):
+            parsed.assistant_message = continuity_reply(
+                language=lang,
+                business_name=biz,
+                full_name=name_hint,
+                user_text=user_text,
+            )
+            current = parsed.assistant_message
+            if (parsed.next_state or "").strip().lower() == "greeting":
+                parsed.next_state = session.current_state or "collecting_identity"
+            logger.info("Blocked re-introduction restart on turn")
+        elif last_assistant and current and current == last_assistant:
+            if abandoning:
+                parsed.assistant_message = continuity_reply(
+                    language=lang,
+                    business_name=biz,
+                    abandoning=True,
+                )
+                parsed.next_state = "abandoned"
+                logger.info("Replaced duplicate abandon line with goodbye")
+            else:
                 from backend.telephony.call_manager import fallback_text
 
-                lang = session.language or turn_language or "en"
                 parsed.assistant_message = fallback_text("repeat", lang)
+
+        if abandoning:
+            msg = (parsed.assistant_message or "").strip()
+            if (
+                not msg
+                or _ASKING_RE.search(msg)
+                or looks_like_reintroduction(
+                    msg, agent_name=agent, business_name=biz
+                )
+            ):
+                parsed.assistant_message = continuity_reply(
+                    language=lang,
+                    business_name=biz,
+                    abandoning=True,
+                )
+                logger.info("Sanitized abandon message to goodbye")
 
         if session.current_state == "greeting":
             session.current_state = "collecting_identity"
 
-        self._apply_extraction(db, lead, parsed, session)
+        self._apply_extraction(db, lead, parsed, session, user_text=user_text)
         db.flush()
 
         fields = self._lead_fields(lead)
