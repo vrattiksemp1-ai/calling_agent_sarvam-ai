@@ -58,6 +58,11 @@ class LeadProfile:
 class CallProfile:
     agent_name: str = "Shivangi"
     business_name: str = "Vrattiks"
+    # Exact Indic spellings for TTS (Gujarati: Shivangi / Vrattiks).
+    agent_name_gu: str = "શિવાંગી"
+    business_name_gu: str = "વ્રત્તિક્સ"
+    agent_name_hi: str = "शिवांगी"
+    business_name_hi: str = "व्रत्तिक्स"
     business_description: str = (
         "a technology and software company focused on building AI-powered "
         "solutions for businesses and individuals."
@@ -65,6 +70,22 @@ class CallProfile:
     products_and_services: list[ProductOffering] = field(default_factory=list)
     contact_source: ContactSource = field(default_factory=ContactSource)
     lead: LeadProfile = field(default_factory=LeadProfile)
+
+    def spoken_agent_name(self, language: str | None = None) -> str:
+        lang = (language or "en").strip().lower()
+        if lang.startswith("gu") or lang == "gujlish":
+            return (self.agent_name_gu or self.agent_name).strip()
+        if lang.startswith("hi") or lang == "hinglish":
+            return (self.agent_name_hi or self.agent_name).strip()
+        return (self.agent_name or "Shivangi").strip()
+
+    def spoken_business_name(self, language: str | None = None) -> str:
+        lang = (language or "en").strip().lower()
+        if lang.startswith("gu") or lang == "gujlish":
+            return (self.business_name_gu or self.business_name).strip()
+        if lang.startswith("hi") or lang == "hinglish":
+            return (self.business_name_hi or self.business_name).strip()
+        return (self.business_name or "Vrattiks").strip()
 
     def to_prompt_context(self, *, compact: bool = False) -> str:
         """Human-readable facts block for the system/user prompt."""
@@ -121,6 +142,12 @@ class CallProfile:
         ):
             if (value or "").strip():
                 lead_bits.append(f"{label}={value.strip()}")
+        spelling = (
+            f"Gujarati spellings: agent={self.agent_name_gu or self.agent_name}, "
+            f"company={self.business_name_gu or self.business_name}; "
+            f"Hindi spellings: agent={self.agent_name_hi or self.agent_name}, "
+            f"company={self.business_name_hi or self.business_name}"
+        )
         if compact:
             lead_block = ", ".join(lead_bits) if lead_bits else "(none)"
             desc = (self.business_description or "").strip()
@@ -131,7 +158,8 @@ class CallProfile:
                 "CALL PROFILE facts (paraphrase; not a script): "
                 f"agent={self.agent_name}; company={company_bit}; "
                 f"products={product_lines}; source={source_block}; "
-                f"contact={lead_block}."
+                f"contact={lead_block}. "
+                f"When speaking Gujarati/Hindi use exact spellings — {spelling}."
             )
 
         lead_block = (
@@ -143,6 +171,11 @@ class CallProfile:
             "CALL PROFILE (internal facts — paraphrase naturally; do not read as a script):\n"
             f"- Agent name: {self.agent_name}\n"
             f"- Company: {self.business_name} — {self.business_description}\n"
+            f"- Spoken name spellings (use EXACTLY in that language for TTS):\n"
+            f"  - Gujarati: {self.agent_name_gu or self.agent_name} / "
+            f"{self.business_name_gu or self.business_name}\n"
+            f"  - Hindi: {self.agent_name_hi or self.agent_name} / "
+            f"{self.business_name_hi or self.business_name}\n"
             f"- Products and services:\n{product_lines}\n"
             f"- Contact source facts (ONLY use if the caller asks how you got their number):\n"
             f"{source_block}\n"
@@ -158,10 +191,10 @@ class CallProfile:
         """
         import random
 
-        name = (self.agent_name or "Shivangi").strip()
-        company = (self.business_name or "our company").strip()
-        contact = (self.lead.full_name or "").strip()
         lang = (language or "en").strip().lower()
+        name = self.spoken_agent_name(lang)
+        company = self.spoken_business_name(lang)
+        contact = (self.lead.full_name or "").strip()
 
         # Keep emergency shells short and fact-based. Wording is randomly
         # chosen so even the fallback is not one frozen sentence forever.
@@ -341,6 +374,18 @@ def build_call_profile(
     return CallProfile(
         agent_name=agent_name,
         business_name=business_name,
+        agent_name_gu=str(
+            file_data.get("agent_name_gu") or "શિવાંગી"
+        ).strip(),
+        business_name_gu=str(
+            file_data.get("business_name_gu") or "વ્રત્તિક્સ"
+        ).strip(),
+        agent_name_hi=str(
+            file_data.get("agent_name_hi") or "शिवांगी"
+        ).strip(),
+        business_name_hi=str(
+            file_data.get("business_name_hi") or "व्रत्तिक्स"
+        ).strip(),
         business_description=business_description
         or (
             "a technology and software company focused on building AI-powered "

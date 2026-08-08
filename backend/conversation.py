@@ -71,8 +71,31 @@ _SERVICE_Q = re.compile(
     re.IGNORECASE,
 )
 _INTRO_RE = re.compile(
-    r"(my name is|i'?m\s+\w+\s+from|હું\s+.+\s+છું|બોલું\s*છું|માંથી\s*.{0,24}\s*બોલ|do you have (a )?(moment|time|couple)|થોડો\s*સમય|થોડીવાર|થોડી\s*મિનિટ|વ્યસ્ત\s*છો|मेरा\s*नाम|बोल\s*रही|समय\s*है|व्यस्त)",
+    r"(my name is|"
+    r"this is\s+\w+\s+from|"
+    r"i'?m\s+(?!calling\b)(?:an?\s+)?(?:ai\s+assistant\s+)?\w+\s+from|"
+    r"ai assistant from|"
+    r"હું\s+.+\s+છું|બોલું\s*છું|માંથી\s*.{0,24}\s*બોલ|"
+    r"do you have (a )?(moment|time|couple)|થોડો\s*સમય|થોડીવાર|થોડી\s*મિનિટ|વ્યસ્ત\s*છો|"
+    r"मेरा\s*नाम|बोल\s*रही|समय\s*है|व्यस्त)",
     re.IGNORECASE,
+)
+_CONTINUATION_RE = re.compile(
+    r"\bi'?m calling (from|because)\b|"
+    r"\bnice to meet you\b|"
+    r"\bwe (help|offer|build|provide)\b|"
+    r"\bdo you (currently )?use\b|"
+    r"lead qualification|software for|ai solutions|ai-powered tools|"
+    r"biggest challenge|current setup",
+    re.IGNORECASE,
+)
+# Common bad ASR/LLM Gujarati spellings for persona names.
+_NAME_SPELLING_FIXES = (
+    (re.compile(r"શિવંગી"), "શિવાંગી"),
+    (re.compile(r"શિવાગી"), "શિવાંગી"),
+    (re.compile(r"વ્રટિક્સ"), "વ્રત્તિક્સ"),
+    (re.compile(r"વૃત્તાંતિક્સ"), "વ્રત્તિક્સ"),
+    (re.compile(r"વૃત્તિક્સ"), "વ્રત્તિક્સ"),
 )
 _TIME_ASK_RE = re.compile(
     r"(do you have|couple of minutes|few minutes|a moment|થોડી?\s*મિનિટ|થોડો\s*સમય|થોડીવાર|વ્યસ્ત\s*છો|समय\s*(है|हो)|व्यस्त)",
@@ -130,34 +153,65 @@ def looks_like_reintroduction(
     agent_name: str = "",
     business_name: str = "",
 ) -> bool:
-    """True when the reply looks like a fresh opening / time-check restart."""
+    """True when the reply looks like a fresh opening / time-check restart.
+
+    Mentions of the company while continuing a pitch ("I'm calling from…",
+    "nice to meet you…", product questions) are NOT treated as re-intros.
+    """
     if not text or not text.strip():
         return False
     t = text.strip()
     tl = t.lower()
     agent = (agent_name or "").strip().lower()
     biz = (business_name or "").strip().lower()
-    persona = False
-    if agent and agent in tl:
-        persona = True
-    if biz and biz in tl:
-        persona = True
-    if "ai assistant" in tl or "ai-powered" in tl:
-        persona = True
+
+    self_intro = bool(_INTRO_RE.search(t))
+    if agent and agent in tl and re.search(
+        r"\b(my name is|this is)\b|"
+        r"\bi'?m\s+(?!calling\b)",
+        tl,
+    ):
+        self_intro = True
     if re.search(
         r"બોલું\s*છું|માંથી\s*.{0,40}\s*બોલ|ફોન\s*કરી\s*રહી|"
-        r"बोल\s*रही\s*हूँ|से\s*कॉल\s*कर|मेरा\s*नाम",
+        r"बोल\s*रही\s*हूँ|मेरा\s*नाम",
         t,
         re.IGNORECASE,
     ):
-        persona = True
-    if not persona and not _INTRO_RE.search(t):
+        self_intro = True
+    if "ai assistant from" in tl or "ai assistant," in tl:
+        self_intro = True
+
+    if not self_intro:
         return False
+
+    # Continuing the sales flow while naming the company is allowed.
+    if _CONTINUATION_RE.search(t) and not _TIME_ASK_RE.search(t):
+        return False
+
     if _TIME_ASK_RE.search(t):
         return True
-    if persona and _INTRO_RE.search(t):
+    # Dense opening restart without an explicit time-check.
+    if self_intro and (biz and biz in tl) and re.search(
+        r"\b(my name is|this is|ai assistant)\b|"
+        r"બોલું\s*છું|मेरा\s*नाम",
+        tl,
+    ):
         return True
     return False
+
+
+def normalize_spoken_names(text: str | None, language: str | None = None) -> str:
+    """Rewrite common bad Gu/Hi spellings of agent/company names for TTS."""
+    if not text:
+        return ""
+    out = text
+    lang = (language or "").strip().lower()
+    has_gu = any("઀" <= ch <= "૿" for ch in out)
+    if lang.startswith("gu") or lang == "gujlish" or has_gu:
+        for pattern, repl in _NAME_SPELLING_FIXES:
+            out = pattern.sub(repl, out)
+    return out
 
 
 def continuity_reply(
@@ -853,6 +907,10 @@ class ConversationEngine:
                     abandoning=True,
                 )
                 logger.info("Sanitized abandon message to goodbye")
+
+        parsed.assistant_message = normalize_spoken_names(
+            parsed.assistant_message, lang
+        )
 
         if session.current_state == "greeting":
             session.current_state = "collecting_identity"

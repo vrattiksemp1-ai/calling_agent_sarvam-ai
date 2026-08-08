@@ -757,17 +757,23 @@ def test_turn_twiml_action_url_contains_token(tmp_path):
     assert 'action="https://x.ngrok-free.app/api/calls/turn?turn_token=turn-secret-123#ct=10000&amp;rt=15000&amp;tt=15000&amp;rc=3&amp;rp=ct,5xx"' in resp.text
 
 
-def test_turn_webhook_empty_speech_silent_relisten(client):
-    """Blank SpeechResult must re-open Gather without speaking 'I'm sorry'."""
-    resp = _signed_turn_post(client, "")
-    assert resp.status_code == 200
-    assert "<Gather" in resp.text
-    assert "<Say>" not in resp.text
-    assert "<Play>" not in resp.text
-    assert "<Hangup" not in resp.text
-    assert 'timeout="5"' in resp.text
-    assert 'speechTimeout="1"' in resp.text
-    assert "api/calls/turn" in resp.text
+def test_turn_webhook_empty_speech_silent_then_prompt(client):
+    """First empty SpeechResult is silent; second asks if caller is still there."""
+    sid = "CA-empty-listen-1"
+    first = _signed_turn_post(client, "", call_sid=sid)
+    assert first.status_code == 200
+    assert "<Gather" in first.text
+    assert "<Say>" not in first.text
+    assert "<Play>" not in first.text
+    assert "<Hangup" not in first.text
+    assert "api/calls/turn" in first.text
+
+    second = _signed_turn_post(client, "", call_sid=sid)
+    assert second.status_code == 200
+    assert "<Gather" in second.text
+    # Prompt via Sarvam <Play> or English <Say> fallback.
+    assert "<Play>" in second.text or "<Say>" in second.text
+    assert "<Hangup" not in second.text
 
 
 def test_turn_webhook_full_conversation(client):

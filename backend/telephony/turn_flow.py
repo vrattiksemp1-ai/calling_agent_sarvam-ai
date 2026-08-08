@@ -600,8 +600,9 @@ class TurnFlow:
             self._registry.update(call_sid, status="in-progress")
 
         # Empty SpeechResult is common while the caller is still starting to talk
-        # (Gather timeout / noise / barge-in). Do NOT speak "I'm sorry" - that
-        # interrupts them and forces a repeat. Silently open another Gather.
+        # (Gather timeout / noise / barge-in). Stay silent for the first miss so
+        # we do not barge in; after N consecutive empties, ask if they are still
+        # there / if we missed something.
         if not text:
             detected_language = self._settings.default_language
             with session_scope(self._factory) as db:
@@ -612,9 +613,38 @@ class TurnFlow:
                     db.flush()
                     self._registry.update(call_sid, session_id=session.id)
                 detected_language = session.language or self._settings.default_language
+            empty_count = int(getattr(record, "empty_listen_count", 0) or 0) + 1
+            self._registry.update(call_sid, empty_listen_count=empty_count)
+            try:
+                prompt_after = int(
+                    getattr(self._settings, "gather_empty_prompt_after", 3) or 3
+                )
+            except (TypeError, ValueError):
+                prompt_after = 3
+            prompt_after = max(1, min(prompt_after, 5))
+
+            if empty_count < prompt_after:
+                logger.info(
+                    "Empty SpeechResult for %s; silent re-listen #%s (lang=%s)",
+                    call_sid,
+                    empty_count,
+                    detected_language,
+                )
+                trace(
+                    "gather.listen.empty",
+                    call_sid=call_sid,
+                    session_id=record.session_id,
+                    language=detected_language,
+                    action="silent_relisten",
+                    empty_listen_count=empty_count,
+                )
+                return self._gather_twiml(None, None, language=detected_language)
+
+            prompt = fallback_text("still_there", detected_language)
             logger.info(
-                "Empty SpeechResult for %s; silent re-listen (lang=%s)",
+                "Empty SpeechResult for %s; still-there prompt #%s (lang=%s)",
                 call_sid,
+                empty_count,
                 detected_language,
             )
             trace(
@@ -622,9 +652,23 @@ class TurnFlow:
                 call_sid=call_sid,
                 session_id=record.session_id,
                 language=detected_language,
-                action="silent_relisten",
+                action="still_there_prompt",
+                empty_listen_count=empty_count,
             )
-            return self._gather_twiml(None, None, language=detected_language)
+            url, _ = await self._host_tts(prompt, detected_language)
+            lang_key = (detected_language or "").strip().lower()
+            if url is not None:
+                return self._gather_twiml(url, None, language=detected_language)
+            # Twilio <Say> cannot speak Indic script — fall back to English.
+            say_text = (
+                prompt
+                if lang_key in {"en", "en-in", "en-IN"}
+                else fallback_text("still_there", "en")
+            )
+            return self._gather_twiml(None, say_text, language=detected_language)
+
+        if getattr(record, "empty_listen_count", 0):
+            self._registry.update(call_sid, empty_listen_count=0)
 
         self._sweep_pending()
         self._drop_pending(call_sid)

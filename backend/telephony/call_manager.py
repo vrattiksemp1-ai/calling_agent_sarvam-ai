@@ -73,6 +73,16 @@ FALLBACK_MESSAGES = {'repeat': {'en': ["Sorry, I didn't catch that. Could you sa
 
 
 
+FALLBACK_MESSAGES['still_there'] = {
+    'en': [
+        "Sorry, I didn't hear anything. Are you still there?",
+        "I didn't catch that — did you say something?",
+        "Are you still on the line? I couldn't hear you.",
+    ],
+    'hi': ['सॉरी, कुछ सुनाई नहीं दिया. क्या आप अभी भी लाइन पर हैं?', 'मैंने कुछ नहीं सुना — आपने कुछ कहा था क्या?', 'क्या आप अभी भी हैं? फिर से बोलिएगा?'],
+    'gu': ['સોરી, કંઈ સંભળાયું નહીં. તમે હજુ લાઈન પર છો?', 'મને કંઈ સંભળાયું નહીં — તમે કંઈ કહ્યું હતું?', 'તમે હજુ છો ને? ફરી એક વાર બોલશો?'],
+}
+
 def fallback_text(
     name: str,
     language: str | None,
@@ -124,6 +134,8 @@ class CallRecord:
     error: str | None = None
     session_id: str | None = None
     lead_overrides: dict | None = None
+    # Consecutive Twilio Gather empty SpeechResult count (reset on real speech).
+    empty_listen_count: int = 0
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 

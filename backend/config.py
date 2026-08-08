@@ -135,9 +135,12 @@ class Settings(BaseSettings):
     # Silent hold before Redirect. 0 = Redirect immediately (saves ~1s).
     gather_poll_pause_seconds: int = 0
     # Twilio speechTimeout: seconds of silence after speech, or "auto".
-    gather_speech_timeout: str = "1"
+    gather_speech_timeout: str = "auto"
     # Whole Gather listen window before empty SpeechResult.
-    gather_timeout_seconds: int = 5
+    gather_timeout_seconds: int = 7
+    # After this many consecutive empty SpeechResults, speak a "still there?"
+    # prompt instead of silent re-listen. 1 = prompt on first empty.
+    gather_empty_prompt_after: int = 3
 
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""

@@ -1,6 +1,10 @@
 {
   "agent_name": "Shivangi",
   "business_name": "Vrattiks",
+  "agent_name_gu": "શિવાંગી",
+  "business_name_gu": "વ્રત્તિક્સ",
+  "agent_name_hi": "शिवांगी",
+  "business_name_hi": "व्रत्तिक्स",
   "business_description": "a technology and software company focused on building AI-powered solutions for businesses and individuals.",
   "products_and_services": [
     {
