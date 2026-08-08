@@ -120,6 +120,24 @@ class Settings(BaseSettings):
     # Phone calls prioritize time-to-first-token. This override is deliberately
     # independent of the browser/API reasoning setting.
     phone_llm_reasoning_effort: str = "none"
+    # Optional faster/smaller model for phone/Gather turns only. Empty = llm_model.
+    # Example with openai-compatible: PHONE_LLM_MODEL=gpt-4o-mini
+    phone_llm_model: str = ""
+    # Shorter phone completions (Gather path). 0 falls back to llm_max_tokens or 140.
+    phone_llm_max_tokens: int = 140
+    phone_llm_temperature: float = 0.4
+    # Compact system prompt on phone transports (less TTFT).
+    phone_prompt_compact: bool = True
+
+    # Twilio Gather (trial) latency knobs — do not expect Media-Streams 2–3s here.
+    # Wait longer inline before Pause/Redirect so more turns return Play+Gather.
+    gather_inline_budget_seconds: float = 5.0
+    # Silent hold before Redirect. 0 = Redirect immediately (saves ~1s).
+    gather_poll_pause_seconds: int = 0
+    # Twilio speechTimeout: seconds of silence after speech, or "auto".
+    gather_speech_timeout: str = "1"
+    # Whole Gather listen window before empty SpeechResult.
+    gather_timeout_seconds: int = 5
 
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
@@ -170,6 +188,10 @@ class Settings(BaseSettings):
     default_lead_additional_notes: str = ""
     # Soft AI disclosure in opening (keeps compliance; wording still BDE-like).
     disclose_ai_assistant: bool = True
+
+    # Verbose pipeline tracing: listen/transcript/LLM/TTS/play with I/O + timings.
+    pipeline_trace_enabled: bool = True
+    pipeline_trace_max_chars: int = 2000
 
     retain_audio: bool = False
     rate_limit_enabled: bool = True

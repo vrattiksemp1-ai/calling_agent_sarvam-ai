@@ -139,7 +139,8 @@ async def test_generate_greeting_injects_business_identity(tmp_path):
     )
     assert "Vrattiks" in system
     assert "a technology and software company" in system
-    assert "BUSINESS" in system
+    # Phone greetings use the compact prompt for lower TTFT.
+    assert "CALL PROFILE" in system
     assert "Vrattiks" in text
 
 
@@ -164,5 +165,5 @@ async def test_generate_greeting_default_persona_is_shivangi(tmp_path):
         if m["role"] == "system"
     )
     assert "Shivangi" in system
-    assert "BUSINESS" in system
     assert "CALL PROFILE" in system
+    assert "phone caller" in system.lower() or "BDE" in system

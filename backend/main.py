@@ -42,6 +42,12 @@ def build_app(
 ) -> FastAPI:
     settings = settings or get_settings()
     setup_logging(settings.debug)
+    from backend.pipeline_trace import configure_pipeline_trace
+
+    configure_pipeline_trace(
+        enabled=settings.pipeline_trace_enabled,
+        max_chars=settings.pipeline_trace_max_chars,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

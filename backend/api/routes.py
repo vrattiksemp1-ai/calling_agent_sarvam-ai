@@ -15,6 +15,7 @@ from backend.errors import LeadNotFoundError, SessionNotFoundError, TtsError
 from backend.exports import lead_to_csv_bytes, lead_to_json_bytes
 from backend.metrics import TurnTimings
 from backend.models import LEAD_FIELDS, Lead, Message, Session
+from backend.pipeline_trace import trace
 from backend.providers.sarvam_client import SarvamClient
 from backend.schemas import (
     ConfirmRequest,
@@ -268,17 +269,42 @@ async def process_audio(
                 data, file.filename or "recording.webm", file.content_type or "", settings
             )
             timings.audio_duration_ms = prepared.duration_ms
+            trace(
+                "browser.audio.listen",
+                session_id=session_id,
+                input={
+                    "filename": file.filename,
+                    "content_type": file.content_type,
+                    "bytes": len(data),
+                    "duration_ms": prepared.duration_ms,
+                },
+            )
 
             transcript, stt_latency, stt_language = await sarvam.transcribe(
                 prepared.wav_path, prepared.duration_ms
             )
             timings.stt_latency_ms = stt_latency
             timings.transcript_char_count = len(transcript)
+            trace(
+                "browser.audio.transcript",
+                session_id=session_id,
+                output={"transcript": transcript, "language": stt_language},
+                latency_ms=stt_latency,
+            )
 
             lead, parsed = await engine.process_turn(
                 db, session, transcript, timings, stt_language=stt_language
             )
             timings.response_char_count = len(parsed.assistant_message)
+            trace(
+                "browser.audio.llm_done",
+                session_id=session_id,
+                output={
+                    "assistant_message": parsed.assistant_message,
+                    "detected_language": parsed.detected_language,
+                },
+                latency_ms=timings.llm_latency_ms,
+            )
 
             audio_base64: str | None = None
             audio_mime: str | None = None
@@ -291,6 +317,15 @@ async def process_audio(
                     )
                     audio_base64 = base64.b64encode(audio_bytes).decode("ascii")
                     timings.tts_attempted = True
+                    trace(
+                        "browser.audio.tts_done",
+                        session_id=session_id,
+                        output={
+                            "audio_bytes": len(audio_bytes),
+                            "audio_mime": audio_mime,
+                        },
+                        latency_ms=tts_latency,
+                    )
                 except TtsError as exc:
                     logger.warning("TTS failed; continuing in text mode: %s", exc.code)
                     warning = "Speech synthesis failed; the reply is shown as text."
@@ -346,8 +381,22 @@ async def process_message(
         timings = TurnTimings(settings=settings)
         transcript = body.text.strip()
         timings.transcript_char_count = len(transcript)
+        trace(
+            "browser.listen",
+            session_id=session_id,
+            input={"text": transcript},
+        )
         lead, parsed = await engine.process_turn(db, session, transcript, timings)
         timings.response_char_count = len(parsed.assistant_message)
+        trace(
+            "browser.llm_done",
+            session_id=session_id,
+            output={
+                "assistant_message": parsed.assistant_message,
+                "detected_language": parsed.detected_language,
+            },
+            latency_ms=timings.llm_latency_ms,
+        )
 
         audio_base64: str | None = None
         audio_mime: str | None = None
@@ -360,6 +409,15 @@ async def process_message(
                 )
                 audio_base64 = base64.b64encode(audio_bytes).decode("ascii")
                 timings.tts_attempted = True
+                trace(
+                    "browser.tts_done",
+                    session_id=session_id,
+                    output={
+                        "audio_bytes": len(audio_bytes),
+                        "audio_mime": audio_mime,
+                    },
+                    latency_ms=tts_latency,
+                )
             except TtsError as exc:
                 logger.warning("TTS failed; continuing in text mode: %s", exc.code)
                 warning = "Speech synthesis failed; the reply is shown as text."

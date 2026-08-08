@@ -362,10 +362,16 @@ class TwilioService:
         slightly different public URL behind ngrok, so a matching shared-secret
         turn_token is also accepted.
         """
-        if signature and self.validate_signature(uri, params, signature):
-            return True
+        if signature:
+            if self.validate_signature(uri, params, signature):
+                return True
+            # Present but invalid signature: allow only a matching turn_token
+            # (ngrok/public URL mismatches). Never accept a bad signature alone.
+            secret = self._settings.twilio_turn_webhook_secret
+            return bool(secret) and secrets.compare_digest(token or "", secret)
         secret = self._settings.twilio_turn_webhook_secret
         if not secret:
+            # Unsigned trial Gather callbacks with no shared secret configured.
             return True
         return secrets.compare_digest(token or "", secret)
 

@@ -26,6 +26,7 @@ import httpx
 from backend.config import Settings, tts_language_code_for
 from backend.errors import ProviderUnavailableError, SttError, TtsError
 from backend.language_utils import map_stt_language_code
+from backend.pipeline_trace import trace
 from backend.schemas import ProviderStatus
 from backend.utils.logging import get_logger
 
@@ -452,6 +453,14 @@ class SarvamClient:
         self, audio_path, duration_ms: int
     ) -> tuple[str, int, str | None]:
         started = time.monotonic()
+        trace(
+            "stt.request",
+            provider="sarvam",
+            model=self._settings.sarvam_stt_model,
+            mode=self._settings.sarvam_stt_mode,
+            audio_path=str(audio_path),
+            audio_duration_ms=duration_ms,
+        )
         try:
             with open(audio_path, "rb") as fh:
                 files = {
@@ -473,7 +482,16 @@ class SarvamClient:
                 )
             latency_ms = int((time.monotonic() - started) * 1000)
             detected_language = map_stt_language_code(payload.get("language_code"))
-            return text.strip(), latency_ms, detected_language
+            transcript = text.strip()
+            trace(
+                "stt.response",
+                provider="sarvam",
+                latency_ms=latency_ms,
+                language=detected_language,
+                transcript=transcript,
+                transcript_chars=len(transcript),
+            )
+            return transcript, latency_ms, detected_language
         except ProviderUnavailableError:
             raise
         except SttError:
@@ -488,6 +506,16 @@ class SarvamClient:
         started = time.monotonic()
         target_language = tts_language_code_for(
             detected_language, self._settings.sarvam_tts_language_code
+        )
+        trace(
+            "tts.request",
+            provider="sarvam",
+            mode="buffered",
+            model=self._settings.sarvam_tts_model,
+            speaker=self._settings.sarvam_tts_speaker,
+            language=target_language,
+            text=text,
+            text_chars=len(text or ""),
         )
         try:
             body = {
@@ -511,6 +539,14 @@ class SarvamClient:
                 raise TtsError("Sarvam returned no audio for the TTS request.")
             audio_bytes = base64.b64decode(audios[0])
             latency_ms = int((time.monotonic() - started) * 1000)
+            trace(
+                "tts.response",
+                provider="sarvam",
+                mode="buffered",
+                latency_ms=latency_ms,
+                audio_bytes=len(audio_bytes),
+                language=target_language,
+            )
             return audio_bytes, "audio/wav", latency_ms
         except ProviderUnavailableError as exc:
             raise TtsError(
@@ -549,6 +585,19 @@ class SarvamClient:
             "pace": self._settings.sarvam_tts_pace,
         }
         url = f"{self._settings.sarvam_base_url.rstrip('/')}/text-to-speech/stream"
+        started = time.monotonic()
+        first_chunk_ms: int | None = None
+        total_bytes = 0
+        trace(
+            "tts.request",
+            provider="sarvam",
+            mode="http_stream",
+            model=self._settings.sarvam_tts_model,
+            speaker=self._settings.sarvam_tts_speaker,
+            language=target_language,
+            text=text,
+            text_chars=len(text or ""),
+        )
         try:
             async with self._http.stream(
                 "POST", url, json=body, headers=self._headers
@@ -561,7 +610,26 @@ class SarvamClient:
                     )
                 async for chunk in resp.aiter_bytes():
                     if chunk:
+                        if first_chunk_ms is None:
+                            first_chunk_ms = int((time.monotonic() - started) * 1000)
+                            trace(
+                                "tts.first_audio",
+                                provider="sarvam",
+                                mode="http_stream",
+                                first_audio_ms=first_chunk_ms,
+                                chunk_bytes=len(chunk),
+                            )
+                        total_bytes += len(chunk)
                         yield chunk
+            trace(
+                "tts.response",
+                provider="sarvam",
+                mode="http_stream",
+                latency_ms=int((time.monotonic() - started) * 1000),
+                first_audio_ms=first_chunk_ms,
+                audio_bytes=total_bytes,
+                language=target_language,
+            )
         except TtsError:
             raise
         except Exception as exc:

@@ -214,6 +214,37 @@ REPAIR_INSTRUCTION = (
     "object matching the required schema. No prose, no markdown fences."
 )
 
+# Shorter phone/Gather prompt — same BDE behavior, less TTFT.
+PHONE_SYSTEM_PROMPT_COMPACT = """You are {agent_name}, a warm BDE-style phone caller for {business_name}.
+Speak naturally like a real sales call. ONE short question per turn. 1 sentence preferred, max 2.
+Stay on-topic. Never invent facts. Paraphrase; never paste a fixed script.
+
+Flow: intro + ask if they have time NOW → name (ask if unknown) → brief products →
+questions/custom needs → if going well, offer a short team call/demo. Capture callback
+time in preferred_contact_time when busy. Answer "how did you get my number?" ONLY if
+asked, using CALL PROFILE source facts (paraphrase). Prefer natural BDE wording; product
+terms like lead-qualification are fine when describing offerings.
+
+Language: reply entirely in the caller's latest language (en/hi/gu/en-hi). detected_language
+must match assistant_message. Your name is {agent_name} from {business_name}.
+Memory: never re-ask collected fields. Put new values in extracted_fields same turn.
+End/busy/callback: save preferred_contact_time when given; goodbye + abandoned when ending.
+Consent/summary rules still apply when basics are known.
+
+Reply with ONE JSON object only:
+{{
+  "assistant_message": "your reply",
+  "detected_language": "en|hi|gu|en-hi",
+  "extracted_fields": {{ }},
+  "fields_to_clear": [],
+  "next_state": "one of: {states}",
+  "conversation_complete": false,
+  "needs_confirmation": false
+}}
+Allowed fields: {fields}
+Refusal token for skipped optional fields: "{refusal}"
+"""
+
 # Appended when a business identity / call profile is configured.
 BUSINESS_BLOCK = """
 - BUSINESS: You are calling on behalf of {business_name}, {business_description}.
@@ -256,6 +287,7 @@ def build_system_prompt(
     agent_name: str | None = None,
     disclose_ai_assistant: bool = True,
     call_profile: "CallProfile | None" = None,
+    compact: bool = False,
 ) -> str:
     fields_csv = ", ".join(LEAD_FIELDS)
     states_csv = _allowed_states_csv()
@@ -275,6 +307,23 @@ def build_system_prompt(
         or business_description
         or "a technology company"
     )
+
+    if compact:
+        prompt = PHONE_SYSTEM_PROMPT_COMPACT.format(
+            fields=fields_csv,
+            states=states_csv,
+            refusal=REFUSAL_TOKEN,
+            agent_name=resolved_agent,
+            business_name=resolved_business,
+        )
+        if disclose_ai_assistant:
+            prompt += (
+                f"\nOpening: briefly note you are an AI assistant from "
+                f"{resolved_business}."
+            )
+        if call_profile is not None:
+            prompt += "\n" + call_profile.to_prompt_context(compact=True)
+        return prompt
 
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
         fields=fields_csv,
@@ -337,6 +386,8 @@ def build_messages(
     disclose_ai_assistant: bool = True,
     call_profile: "CallProfile | None" = None,
     style_signal: TranscriptStyleSignal | None = None,
+    compact: bool = False,
+    history_limit: int | None = None,
 ) -> list[dict]:
     state_block = (
         "\n\nCurrent state: "
@@ -367,20 +418,22 @@ def build_messages(
         agent_name=agent_name,
         disclose_ai_assistant=disclose_ai_assistant,
         call_profile=call_profile,
+        compact=compact,
     )
-    if style_signal is not None:
+    # Style block is skipped in compact phone mode to keep TTFT low.
+    if style_signal is not None and not compact:
         system += style_prompt_block(style_signal)
     if language:
         name = LANGUAGE_NAMES.get((language or "").strip().lower(), language)
         system += f"\n\nThe caller speaks {name}. Reply entirely in {name}."
-    if include_field_glossary:
+    if include_field_glossary and not compact:
         glossary = "\nField meanings:\n" + "\n".join(
             f"- {k}: {v}" for k, v in FIELD_GLOSSARY.items()
         )
         system += glossary
     messages: list[dict] = [{"role": "system", "content": system}]
-    # Include recent history only to stay within local model context windows.
-    for msg in history[-12:]:
+    limit = history_limit if history_limit is not None else (6 if compact else 12)
+    for msg in history[-limit:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": state_block})
     if repair:

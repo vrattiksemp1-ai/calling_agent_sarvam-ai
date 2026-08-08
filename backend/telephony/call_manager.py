@@ -25,6 +25,7 @@ from backend.errors import AppError
 from backend.metrics import TurnTimings, persist_turn_telemetry
 from backend.models import Message, Session
 from backend.language_utils import map_stt_language_code
+from backend.pipeline_trace import trace
 from backend.providers.sarvam_client import SarvamClient
 from backend.streaming_json import StreamingTextChunker
 from backend.telephony import mulaw
@@ -283,10 +284,23 @@ class CallSession:
     async def _speak(
         self, text: str, timings: TurnTimings | None = None
     ) -> None:
+        trace(
+            "stream.play.start",
+            call_sid=self._call_sid,
+            turn_id=timings.turn_id if timings else None,
+            text=text,
+            text_chars=len(text or ""),
+        )
         try:
             audio, _, tts_ms = await self._sarvam.synthesize(text, None)
         except AppError as exc:
             logger.warning("Call TTS failed: %s", exc.code)
+            trace(
+                "stream.play.error",
+                call_sid=self._call_sid,
+                turn_id=timings.turn_id if timings else None,
+                error=exc.code,
+            )
             return
         if timings is not None:
             timings.retry_count += max(
@@ -298,6 +312,13 @@ class CallSession:
             timings.tts_latency_ms = tts_ms
             timings.mark("tts_first_audio")
         await self._stream_wav(audio, timings)
+        trace(
+            "stream.play.queued",
+            call_sid=self._call_sid,
+            turn_id=timings.turn_id if timings else None,
+            audio_bytes=len(audio),
+            tts_ms=tts_ms,
+        )
 
     async def _stream_tts_socket(self, tts_session, timings: TurnTimings) -> None:
         """Pace provider-native 8 kHz chunks directly to the call transport."""
@@ -406,12 +427,27 @@ class CallSession:
         tmp = self._settings.resolved_temp_dir / f"call_{uuid.uuid4().hex}.wav"
         tmp.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_bytes(wav)
+        trace(
+            "stream.utterance.end",
+            call_sid=self._call_sid,
+            turn_id=timings.turn_id,
+            session_id=self._session_id,
+            audio_duration_ms=duration_ms,
+            pcm_bytes=len(pcm16),
+            transport=self._transport.name,
+        )
         try:
             transcript, stt_ms, stt_language = await self._sarvam.transcribe(
                 str(tmp), duration_ms
             )
         except AppError as exc:
             logger.warning("Call STT failed: %s", exc.code)
+            trace(
+                "stream.stt.error",
+                call_sid=self._call_sid,
+                turn_id=timings.turn_id,
+                error=exc.code,
+            )
             await self._speak(fallback_text("repeat", self._settings.default_language))
             return
         finally:
@@ -425,6 +461,15 @@ class CallSession:
         timings.transcript_char_count = len(transcript)
         timings.audio_duration_ms = duration_ms
         timings.mark("transcript_received")
+        trace(
+            "stream.transcript.received",
+            call_sid=self._call_sid,
+            turn_id=timings.turn_id,
+            session_id=self._session_id,
+            stt_ms=stt_ms,
+            language=stt_language,
+            transcript=transcript,
+        )
         await self._handle_transcript(transcript, stt_language, timings)
 
     async def _handle_transcript(
@@ -455,6 +500,15 @@ class CallSession:
                 use_streaming = (
                     self._settings.llm_streaming_enabled
                     and self._settings.sarvam_realtime_tts_enabled
+                )
+                trace(
+                    "stream.conversation.start",
+                    call_sid=self._call_sid,
+                    turn_id=timings.turn_id,
+                    session_id=session.id,
+                    state=session.current_state,
+                    transcript=transcript,
+                    streaming=use_streaming,
                 )
                 tts_session = None
                 tts_consumer = None
@@ -699,6 +753,17 @@ class CallSession:
                     self._utterance.clear()
                     language = map_stt_language_code(event.language_code)
                     timings.stt_language = language
+                    trace(
+                        "stream.stt_final",
+                        call_id=self._call_sid,
+                        session_id=self._session_id,
+                        input={
+                            "transcript": event.transcript.strip(),
+                            "language_code": event.language_code,
+                            "mapped_language": language,
+                        },
+                        latency_ms=timings.phase_elapsed_ms.get("stt_first_final"),
+                    )
                     timings.log(logger, event="stt_first_final")
                     await self._replace_response(
                         self._handle_transcript(

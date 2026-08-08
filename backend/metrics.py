@@ -151,6 +151,21 @@ class TurnTimings:
 
     def log(self, logger, event: str = "turn_telemetry", **extra: Any) -> None:
         """Emit machine-readable telemetry without requiring a DB migration."""
+        phase_breakdown = {
+            "stt_ms": self.stt_latency_ms,
+            "llm_ms": self.llm_latency_ms,
+            "tts_ms": self.tts_latency_ms,
+            "transcript_to_llm_done_ms": self.duration_between(
+                "transcript_received", "llm_completed"
+            ),
+            "llm_done_to_tts_first_ms": self.duration_between(
+                "llm_completed", "tts_first_audio"
+            ),
+            "tts_first_to_outbound_ms": self.duration_between(
+                "tts_first_audio", "first_outbound_audio"
+            ),
+        }
+        usage = dict(self.llm_usage or {})
         payload = {
             "event": event,
             "turn_id": self.turn_id,
@@ -161,10 +176,34 @@ class TurnTimings:
             "phase_elapsed_ms": self.phase_elapsed_ms,
             "phase_durations_ms": self.phase_durations_ms,
             "phase_timestamps": self.phase_timestamps,
+            "phase_breakdown_ms": phase_breakdown,
+            "transcript_chars": self.transcript_char_count,
+            "response_chars": self.response_char_count,
+            "llm_usage": {
+                "prompt_tokens": usage.get("prompt_tokens"),
+                "completion_tokens": usage.get("completion_tokens"),
+                "total_tokens": usage.get("total_tokens"),
+            },
             "dimensions": self.dimensions(),
             **extra,
         }
-        logger.info("telemetry=%s", json.dumps(payload, sort_keys=True))
+        logger.info("telemetry=%s", json.dumps(payload, sort_keys=True, default=str))
+        try:
+            from backend.pipeline_trace import trace
+
+            trace(
+                event,
+                turn_id=self.turn_id,
+                session_id=self.session_id,
+                caller_perceived_latency_ms=self.caller_perceived(),
+                total_elapsed_ms=self.total(),
+                phase_elapsed_ms=self.phase_elapsed_ms,
+                phase_breakdown_ms=phase_breakdown,
+                transport=self.transport,
+                **extra,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def total(self) -> int:
         return max(0, int((time.monotonic() - self.started) * 1000))

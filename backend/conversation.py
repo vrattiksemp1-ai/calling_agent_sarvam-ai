@@ -32,6 +32,7 @@ from backend.language_utils import (
     resolve_turn_language,
 )
 from backend.metrics import persist_turn_telemetry
+from backend.pipeline_trace import trace
 from backend.prompts import REFUSAL_TOKEN
 from backend.providers.llm_client import LlmClient
 from backend.schemas import LeadOut
@@ -94,14 +95,46 @@ class ConversationEngine:
         self._business_description = profile.business_description
         self._agent_name = profile.agent_name
 
-    def _prompt_kwargs(self) -> dict:
+    def _prompt_kwargs(self, *, compact: bool = False) -> dict:
         return {
             "business_name": self._business_name,
             "business_description": self._business_description,
             "agent_name": self._agent_name,
             "disclose_ai_assistant": self._disclose_ai_assistant,
             "call_profile": self._call_profile,
+            "compact": compact,
         }
+
+    @staticmethod
+    def _is_phone_transport(timings) -> bool:
+        transport = (getattr(timings, "transport", None) or "api").strip().lower()
+        return transport not in {"", "api", "browser"}
+
+    def _phone_llm_kwargs(self, timings) -> dict:
+        """Model/token/temp overrides for Gather / Media Streams turns."""
+        settings = self._llm._settings
+        if not self._is_phone_transport(timings):
+            return {
+                "max_tokens": settings.llm_max_tokens or 220,
+                "reasoning_effort": None,
+            }
+        max_tokens = settings.phone_llm_max_tokens or settings.llm_max_tokens or 140
+        kwargs: dict = {
+            "max_tokens": max_tokens,
+            "reasoning_effort": settings.phone_llm_reasoning_effort,
+            "temperature": settings.phone_llm_temperature,
+        }
+        phone_model = (settings.phone_llm_model or "").strip()
+        if phone_model:
+            kwargs["model"] = phone_model
+        return kwargs
+
+    def _use_compact_prompt(self, timings) -> bool:
+        settings = self._llm._settings
+        return bool(
+            self._is_phone_transport(timings)
+            and getattr(settings, "phone_prompt_compact", True)
+        )
 
     def _lead_fields(self, lead: Lead | None) -> dict[str, str]:
         if lead is None:
@@ -212,6 +245,8 @@ class ConversationEngine:
     ) -> tuple[str, int, dict, object | None]:
         """Run the LLM and return (raw, latency, usage, parsed-or-None)."""
         style_signal = rolling_transcript_style(history)
+        compact = self._use_compact_prompt(timings)
+        phone_kwargs = self._phone_llm_kwargs(timings)
         if on_assistant_chunk is not None:
             timings.llm_attempt_count += 1
             messages = prompts.build_messages(
@@ -221,8 +256,8 @@ class ConversationEngine:
                 session.current_state,
                 repair=False,
                 language=language,
-                style_signal=style_signal,
-                **self._prompt_kwargs(),
+                style_signal=None if compact else style_signal,
+                **self._prompt_kwargs(compact=compact),
             )
             parser = AssistantMessageStreamParser()
             raw_parts: list[str] = []
@@ -231,9 +266,8 @@ class ConversationEngine:
             try:
                 async for event in self._llm.stream_generate(
                     messages,
-                    max_tokens=self._llm._settings.llm_max_tokens or 220,
                     max_retries=0,
-                    reasoning_effort=self._llm._settings.phone_llm_reasoning_effort,
+                    **phone_kwargs,
                 ):
                     if event.type == "delta":
                         raw_parts.append(event.delta)
@@ -275,19 +309,20 @@ class ConversationEngine:
                 session.current_state,
                 repair=repair,
                 language=language,
-                style_signal=style_signal,
-                **self._prompt_kwargs(),
+                style_signal=None if compact else style_signal,
+                **self._prompt_kwargs(compact=compact),
             )
             # Phone turns need one fast shot: no provider retries, short replies.
+            gen_kwargs = dict(phone_kwargs)
+            if not self._is_phone_transport(timings):
+                gen_kwargs = {
+                    "max_tokens": self._llm._settings.llm_max_tokens or 220,
+                    "reasoning_effort": None,
+                }
             raw, latency, usage = await self._llm.generate(
                 messages,
-                max_tokens=self._llm._settings.llm_max_tokens or 220,
                 max_retries=0,
-                reasoning_effort=(
-                    self._llm._settings.phone_llm_reasoning_effort
-                    if getattr(timings, "transport", "api") != "api"
-                    else None
-                ),
+                **gen_kwargs,
             )
             timings.retry_count += max(
                 0, getattr(self._llm, "last_attempt_count", 1) - 1
@@ -321,6 +356,10 @@ class ConversationEngine:
             if repair:
                 timings.repair_count += 1
             timings.llm_attempt_count += 1
+            # Greetings are always phone/opening-latency sensitive.
+            compact = bool(
+                getattr(self._llm._settings, "phone_prompt_compact", True)
+            )
             messages = prompts.build_messages(
                 [],
                 self._call_profile.lead.as_lead_fields(),
@@ -328,11 +367,23 @@ class ConversationEngine:
                 "greeting",
                 repair=repair,
                 language=language,
-                **self._prompt_kwargs(),
+                **self._prompt_kwargs(compact=compact),
             )
+            phone_kwargs = {
+                "max_tokens": (
+                    self._llm._settings.phone_llm_max_tokens
+                    or self._llm._settings.llm_max_tokens
+                    or 140
+                ),
+                "reasoning_effort": self._llm._settings.phone_llm_reasoning_effort,
+                "temperature": self._llm._settings.phone_llm_temperature,
+            }
+            phone_model = (self._llm._settings.phone_llm_model or "").strip()
+            if phone_model:
+                phone_kwargs["model"] = phone_model
             raw, latency, usage = await self._llm.generate(
                 messages,
-                reasoning_effort=self._llm._settings.phone_llm_reasoning_effort,
+                **phone_kwargs,
             )
             timings.retry_count += max(
                 0, getattr(self._llm, "last_attempt_count", 1) - 1
@@ -392,6 +443,20 @@ class ConversationEngine:
             stt_language=stt_language,
         )
         timings.language_expected = turn_language or prior_language
+        timings.session_id = session.id
+        trace(
+            "conversation.turn.start",
+            turn_id=timings.turn_id,
+            session_id=session.id,
+            transport=getattr(timings, "transport", None),
+            state=session.current_state,
+            language_prior=prior_language,
+            language_expected=turn_language or prior_language,
+            stt_language=stt_language,
+            user_text=user_text,
+            history_turns=len(history),
+            streaming=on_assistant_chunk is not None,
+        )
         llm_kwargs = {"language": turn_language}
         # Avoid changing the invocation shape for existing subclasses and test
         # doubles that override the established buffered _llm_turn signature.
@@ -568,6 +633,23 @@ class ConversationEngine:
             )
         )
         db.add(session)
+        extracted = getattr(parsed, "extracted_fields", None) or {}
+        trace(
+            "conversation.turn.end",
+            turn_id=timings.turn_id,
+            session_id=session.id,
+            state=session.current_state,
+            next_state_suggested=getattr(parsed, "next_state", None),
+            language=session.language,
+            assistant_message=parsed.assistant_message,
+            extracted_fields=extracted,
+            llm_latency_ms=timings.llm_latency_ms,
+            stt_latency_ms=timings.stt_latency_ms,
+            total_elapsed_ms=timings.total(),
+            conversation_complete=bool(
+                getattr(parsed, "conversation_complete", False)
+            ),
+        )
         return lead, parsed
 
     async def handle_confirmation(

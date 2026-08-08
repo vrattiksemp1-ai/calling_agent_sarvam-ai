@@ -20,6 +20,7 @@ import httpx
 
 from backend.config import Settings
 from backend.errors import LlmError, ProviderUnavailableError
+from backend.pipeline_trace import summarize_messages, trace
 from backend.schemas import ProviderStatus
 from backend.utils.logging import get_logger
 
@@ -99,11 +100,17 @@ class LlmClient:
         max_tokens: int | None = None,
         reasoning_effort: str | None = None,
         stream: bool = False,
+        model: str | None = None,
+        temperature: float | None = None,
     ) -> dict:
         body: dict = {
-            "model": self._settings.llm_model,
+            "model": (model or "").strip() or self._settings.llm_model,
             "messages": messages,
-            "temperature": getattr(self._settings, "llm_temperature", 0.55),
+            "temperature": (
+                temperature
+                if temperature is not None
+                else getattr(self._settings, "llm_temperature", 0.55)
+            ),
         }
         reasoning = (
             self._settings.llm_reasoning_effort
@@ -139,6 +146,8 @@ class LlmClient:
         max_tokens: int | None = None,
         max_retries: int | None = None,
         reasoning_effort: str | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
     ) -> httpx.Response:
         last_error: Exception | None = None
         retries = MAX_RETRIES if max_retries is None else max(0, max_retries)
@@ -147,6 +156,8 @@ class LlmClient:
             messages,
             max_tokens=max_tokens,
             reasoning_effort=reasoning_effort,
+            model=model,
+            temperature=temperature,
         )
         url = self._chat_url()
         for attempt in range(attempts):
@@ -231,6 +242,8 @@ class LlmClient:
         max_tokens: int | None = None,
         max_retries: int | None = None,
         reasoning_effort: str | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
     ) -> AsyncIterator[LlmStreamEvent]:
         """Yield normalized deltas from an OpenAI-compatible SSE response.
 
@@ -246,6 +259,8 @@ class LlmClient:
             max_tokens=max_tokens,
             reasoning_effort=reasoning_effort,
             stream=True,
+            model=model,
+            temperature=temperature,
         )
         first_token_ms: int | None = None
         usage: dict = {}
@@ -253,6 +268,18 @@ class LlmClient:
         last_error: Exception | None = None
         self._last_first_token_latency_ms.set(None)
         self._last_stream_usage.set({})
+        resolved_model = body.get("model")
+        streamed_chars = 0
+        trace(
+            "llm.request",
+            provider=self._settings.llm_provider,
+            model=resolved_model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+            stream=True,
+            input=summarize_messages(messages),
+        )
 
         for attempt in range(attempts):
             emitted = False
@@ -309,6 +336,14 @@ class LlmClient:
                                 (time.monotonic() - started) * 1000
                             )
                             self._last_first_token_latency_ms.set(first_token_ms)
+                            trace(
+                                "llm.first_token",
+                                provider=self._settings.llm_provider,
+                                model=resolved_model,
+                                first_token_ms=first_token_ms,
+                                preview=delta,
+                            )
+                        streamed_chars += len(delta)
                         emitted = True
                         yield LlmStreamEvent(
                             type="delta",
@@ -318,6 +353,17 @@ class LlmClient:
 
                 completion_ms = int((time.monotonic() - started) * 1000)
                 self._last_stream_usage.set(dict(usage))
+                trace(
+                    "llm.response",
+                    provider=self._settings.llm_provider,
+                    model=resolved_model,
+                    latency_ms=completion_ms,
+                    first_token_ms=first_token_ms,
+                    output_chars=streamed_chars,
+                    usage=usage,
+                    finish_reason=finish_reason,
+                    stream=True,
+                )
                 yield LlmStreamEvent(
                     type="done",
                     first_token_latency_ms=first_token_ms,
@@ -371,13 +417,28 @@ class LlmClient:
         max_tokens: int | None = None,
         max_retries: int | None = None,
         reasoning_effort: str | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
     ) -> tuple[str, int, dict]:
         started = time.monotonic()
+        resolved_model = (model or "").strip() or self._settings.llm_model
+        trace(
+            "llm.request",
+            provider=self._settings.llm_provider,
+            model=resolved_model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+            stream=False,
+            input=summarize_messages(messages),
+        )
         resp = await self._chat(
             messages,
             max_tokens=max_tokens,
             max_retries=max_retries,
             reasoning_effort=reasoning_effort,
+            model=model,
+            temperature=temperature,
         )
         payload = resp.json()
         try:
@@ -389,6 +450,15 @@ class LlmClient:
             )
         usage = payload.get("usage") or {}
         latency_ms = int((time.monotonic() - started) * 1000)
+        trace(
+            "llm.response",
+            provider=self._settings.llm_provider,
+            model=resolved_model,
+            latency_ms=latency_ms,
+            output_chars=len(content or ""),
+            output=content,
+            usage=usage,
+        )
         return content, latency_ms, usage
 
     async def health_check(self) -> ProviderStatus:

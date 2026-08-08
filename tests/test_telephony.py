@@ -765,7 +765,8 @@ def test_turn_webhook_empty_speech_silent_relisten(client):
     assert "<Say>" not in resp.text
     assert "<Play>" not in resp.text
     assert "<Hangup" not in resp.text
-    assert 'timeout="6"' in resp.text
+    assert 'timeout="5"' in resp.text
+    assert 'speechTimeout="1"' in resp.text
     assert "api/calls/turn" in resp.text
 
 
@@ -889,12 +890,16 @@ def test_turn_webhook_defers_with_redirect_when_slow(tmp_path, monkeypatch):
     monkeypatch.setattr(turn_flow_mod.TurnFlow, "_build_turn_twiml", slow_build)
 
     client = _turn_app(tmp_path)
+    # Force a short inline budget via settings as well (Gather-optimized path).
+    client.app.state.settings.gather_inline_budget_seconds = 0.05
+    client.app.state.settings.gather_poll_pause_seconds = 0
     resp = _token_turn_post(client, "my name is rahul", call_sid="CA-slow-1")
     assert resp.status_code == 200
     assert "<Redirect" in resp.text
     assert "/api/calls/turn-result" in resp.text
     assert "pending=" in resp.text
-    assert "<Pause" in resp.text
+    # Pause is disabled by default to save ~1s of perceived latency.
+    assert "<Pause" not in resp.text
     assert "<Say>" not in resp.text
 
     # Follow the redirect URL path (strip public base + fragment).

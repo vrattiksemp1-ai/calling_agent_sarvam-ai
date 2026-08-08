@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.config import Settings
+from backend.pipeline_trace import trace
 from backend.telephony.call_manager import CallRecord, CallRegistry, CallSession
 from backend.telephony.exotel_service import ExotelService
 from backend.telephony.phone import InvalidPhoneNumberError, normalize_e164
@@ -151,6 +152,15 @@ async def place_call(request: Request, body: PlaceCallRequest) -> CallStatusOut:
     )
     request.app.state.conversation_engine.set_call_profile(profile)
 
+    trace(
+        "call.place.start",
+        provider=provider,
+        to=to,
+        trial_mode=settings.twilio_trial_mode,
+        lead_overrides=lead_overrides,
+        agent=profile.agent_name,
+        company=profile.business_name,
+    )
     result = await service.start_call(to)
     record = CallRecord(
         call_sid=result.call_sid,
@@ -162,6 +172,14 @@ async def place_call(request: Request, body: PlaceCallRequest) -> CallStatusOut:
     )
     registry.add(record)
     logger.info("Call registered: %s", result.call_sid)
+    trace(
+        "call.place.ok",
+        call_sid=result.call_sid,
+        provider=provider,
+        status=result.status,
+        to=result.to,
+        from_=result.from_,
+    )
     return _status_out(record)
 
 
@@ -227,8 +245,25 @@ async def turn_callback(request: Request) -> Response:
 
     call_sid = params.get("CallSid") or ""
     speech_result = params.get("SpeechResult") or ""
+    trace(
+        "gather.webhook.in",
+        call_sid=call_sid,
+        speech_result=speech_result,
+        speech_chars=len(speech_result or ""),
+        confidence=params.get("Confidence"),
+        language=params.get("Language"),
+    )
     turn_flow: TurnFlow = request.app.state.turn_flow
     content = await turn_flow.process_webhook(call_sid, speech_result)
+    trace(
+        "gather.webhook.out",
+        call_sid=call_sid,
+        twiml_chars=len(content or ""),
+        has_play="<Play>" in (content or ""),
+        has_redirect="<Redirect" in (content or ""),
+        has_gather="<Gather" in (content or ""),
+        has_hangup="<Hangup" in (content or ""),
+    )
     return Response(content=content, media_type="text/xml")
 
 

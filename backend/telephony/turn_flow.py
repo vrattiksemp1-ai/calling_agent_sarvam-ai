@@ -33,6 +33,7 @@ from backend.errors import AppError
 from backend.metrics import TurnTimings, persist_turn_telemetry
 from backend.call_profile import build_call_profile
 from backend.models import Lead, Message, Session
+from backend.pipeline_trace import trace
 from backend.providers.sarvam_client import SarvamClient
 from backend.telephony.call_manager import (
     CallRecord,
@@ -56,9 +57,10 @@ TTS_STREAM_TTL_SECONDS = 120
 # Twilio call-processing webhooks hard-cap at ~15s. Heavy LLM+TTS work must
 # NOT run inside that request - we return a short hold + Redirect to
 # /turn-result and finish there so Twilio never plays "could not reach TwiML".
-TURN_INLINE_BUDGET_SECONDS = 2.5
+# Defaults favor Gather latency; Settings can override per deployment.
+TURN_INLINE_BUDGET_SECONDS = 5.0
 TURN_POLL_WAIT_SECONDS = 12.0
-TURN_POLL_PAUSE_SECONDS = 1
+TURN_POLL_PAUSE_SECONDS = 0
 MAX_TURN_POLLS = 6
 PENDING_TURN_TTL_SECONDS = 180
 
@@ -145,12 +147,44 @@ class TurnFlow:
 
     # ---------- TwiML builders ----------
 
+    def _inline_budget_seconds(self) -> float:
+        try:
+            configured = float(self._settings.gather_inline_budget_seconds)
+        except (TypeError, ValueError, AttributeError):
+            configured = TURN_INLINE_BUDGET_SECONDS
+        # Tests monkeypatch the module constant to a tiny value.
+        if TURN_INLINE_BUDGET_SECONDS < 1.0:
+            return float(TURN_INLINE_BUDGET_SECONDS)
+        return configured
+
+    def _poll_pause_seconds(self) -> int:
+        try:
+            return max(0, int(self._settings.gather_poll_pause_seconds))
+        except (TypeError, ValueError, AttributeError):
+            return max(0, int(TURN_POLL_PAUSE_SECONDS))
+
     def _gather_attrs(self, turn_url: str, language: str | None = None) -> str:
         lang = _gather_language(language or self._settings.default_language)
+        speech_timeout = (
+            getattr(self._settings, "gather_speech_timeout", None) or "1"
+        ).strip() or "1"
+        try:
+            gather_timeout = int(
+                getattr(self._settings, "gather_timeout_seconds", 5) or 5
+            )
+        except (TypeError, ValueError):
+            gather_timeout = 5
+        gather_timeout = max(1, min(gather_timeout, 15))
         return (
-            'input="speech" action="{url}" method="POST" speechTimeout="auto" '
-            'timeout="6" language="{lang}" actionOnEmptyResult="true"'
-        ).format(url=_escape(turn_url), lang=lang)
+            'input="speech" action="{url}" method="POST" '
+            'speechTimeout="{speech_timeout}" timeout="{timeout}" '
+            'language="{lang}" actionOnEmptyResult="true"'
+        ).format(
+            url=_escape(turn_url),
+            lang=lang,
+            speech_timeout=_escape(speech_timeout),
+            timeout=gather_timeout,
+        )
 
     def _gather_twiml(
         self,
@@ -181,10 +215,13 @@ class TurnFlow:
         if pending.timings is not None:
             pending.timings.mark("redirect_issued")
         url = self._twilio.turn_result_url(pending.call_sid, pending.token)
+        pause_s = self._poll_pause_seconds()
+        # Pause length 0 wastes a full second of perceived latency; skip it.
+        pause_xml = f'<Pause length="{pause_s}"/>' if pause_s > 0 else ""
         return (
             '<?xml version="1.0" encoding="UTF-8"?>'
             "<Response>"
-            f'<Pause length="{TURN_POLL_PAUSE_SECONDS}"/>'
+            f"{pause_xml}"
             f'<Redirect method="POST">{_escape(url)}</Redirect>'
             "</Response>"
         )
@@ -580,6 +617,13 @@ class TurnFlow:
                 call_sid,
                 detected_language,
             )
+            trace(
+                "gather.listen.empty",
+                call_sid=call_sid,
+                session_id=record.session_id,
+                language=detected_language,
+                action="silent_relisten",
+            )
             return self._gather_twiml(None, None, language=detected_language)
 
         self._sweep_pending()
@@ -602,16 +646,26 @@ class TurnFlow:
                 session = db.get(Session, record.session_id)
                 if session and session.language:
                     pending.language = session.language
+        trace(
+            "gather.transcript.received",
+            call_sid=call_sid,
+            turn_id=pending.timings.turn_id if pending.timings else None,
+            session_id=record.session_id,
+            stt_provider="twilio",
+            language=pending.language,
+            transcript=text,
+            transcript_chars=len(text),
+            inline_budget_s=self._inline_budget_seconds(),
+        )
         self._pending_turns[call_sid] = pending
         pending.task = asyncio.create_task(
             self._run_turn_job(pending, text), name=f"turn-{call_sid[-8:]}"
         )
         # Keep the Twilio webhook tiny. If the reply is ready almost immediately
         # we return it inline; otherwise Redirect before Twilio's ~15s cap.
+        inline_budget = self._inline_budget_seconds()
         try:
-            await asyncio.wait_for(
-                pending.done.wait(), timeout=TURN_INLINE_BUDGET_SECONDS
-            )
+            await asyncio.wait_for(pending.done.wait(), timeout=inline_budget)
         except asyncio.TimeoutError:
             content = self._pending_redirect_twiml(pending)
             if pending.timings is not None:
@@ -619,7 +673,14 @@ class TurnFlow:
             logger.warning(
                 "Turn for %s still running after %.1fs; deferring via Redirect",
                 call_sid,
-                TURN_INLINE_BUDGET_SECONDS,
+                inline_budget,
+            )
+            trace(
+                "gather.turn.redirect",
+                call_sid=call_sid,
+                turn_id=pending.timings.turn_id if pending.timings else None,
+                waited_ms=int(inline_budget * 1000),
+                pause_s=self._poll_pause_seconds(),
             )
             return content
 
@@ -629,7 +690,22 @@ class TurnFlow:
         if pending.error is not None or not pending.twiml:
             lang = pending.language or self._settings.default_language
             repeat = fallback_text("repeat", "en")
+            trace(
+                "gather.turn.error_fallback",
+                call_sid=call_sid,
+                turn_id=pending.timings.turn_id if pending.timings else None,
+                error=str(pending.error) if pending.error else "empty_twiml",
+                fallback=repeat,
+            )
             return self._say_gather_twiml(repeat, language=lang)
+        trace(
+            "gather.turn.inline_ok",
+            call_sid=call_sid,
+            turn_id=pending.timings.turn_id if pending.timings else None,
+            language=pending.language,
+            twiml_chars=len(pending.twiml or ""),
+            total_elapsed_ms=pending.timings.total() if pending.timings else None,
+        )
         return pending.twiml
 
     async def poll_pending_turn(self, call_sid: str, pending_token: str) -> str:
@@ -765,10 +841,37 @@ class TurnFlow:
                 pending.language = detected_language
             completed = session.status == "completed"
             abandoned = session.status == "abandoned"
+            trace(
+                "gather.llm.done",
+                call_sid=call_sid,
+                turn_id=timings.turn_id,
+                session_id=session.id,
+                state=session.current_state,
+                language=detected_language,
+                reply=reply,
+                llm_latency_ms=timings.llm_latency_ms,
+                completed=completed,
+                abandoned=abandoned,
+            )
 
             if not completed and not abandoned:
+                trace(
+                    "gather.tts.start",
+                    call_sid=call_sid,
+                    turn_id=timings.turn_id,
+                    language=detected_language,
+                    text=reply,
+                )
                 reply_url, tts_ms = await self._stream_tts(
                     reply, detected_language, timings
+                )
+                trace(
+                    "gather.tts.done",
+                    call_sid=call_sid,
+                    turn_id=timings.turn_id,
+                    tts_ms=tts_ms,
+                    audio_url=reply_url,
+                    mode=timings.tts_mode,
                 )
                 if reply_url:
                     timings.tts_latency_ms = tts_ms

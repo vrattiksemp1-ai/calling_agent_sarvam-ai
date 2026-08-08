@@ -66,31 +66,49 @@ class CallProfile:
     contact_source: ContactSource = field(default_factory=ContactSource)
     lead: LeadProfile = field(default_factory=LeadProfile)
 
-    def to_prompt_context(self) -> str:
+    def to_prompt_context(self, *, compact: bool = False) -> str:
         """Human-readable facts block for the system/user prompt."""
         products = self.products_and_services or []
         if products:
-            product_lines = "\n".join(
-                f"  - {p.name}: {p.summary}".rstrip(": ") for p in products
-            )
+            if compact:
+                product_lines = "; ".join(
+                    f"{p.name}" + (f" ({p.summary})" if p.summary else "")
+                    for p in products[:4]
+                )
+            else:
+                product_lines = "\n".join(
+                    f"  - {p.name}: {p.summary}".rstrip(": ") for p in products
+                )
         else:
-            product_lines = "  - (not configured; speak only at a high level about the company)"
+            product_lines = (
+                "(none configured)"
+                if compact
+                else "  - (not configured; speak only at a high level about the company)"
+            )
 
         source_channel = (self.contact_source.channel or "").strip()
         source_detail = (self.contact_source.detail or "").strip()
         if source_channel or source_detail:
             source_block = (
-                f"  channel: {source_channel or '(unspecified)'}\n"
-                f"  detail: {source_detail or '(unspecified)'}"
+                f"{source_channel or 'unspecified'}: {source_detail or 'n/a'}"
+                if compact
+                else (
+                    f"  channel: {source_channel or '(unspecified)'}\n"
+                    f"  detail: {source_detail or '(unspecified)'}"
+                )
             )
         else:
             source_block = (
-                "  (not configured — if asked how you got the number, answer "
-                "gracefully like a real BDE without inventing a fake story)"
+                "(unset — answer generally if asked, do not invent)"
+                if compact
+                else (
+                    "  (not configured — if asked how you got the number, answer "
+                    "gracefully like a real BDE without inventing a fake story)"
+                )
             )
 
         lead = self.lead
-        lead_lines = []
+        lead_bits = []
         for label, value in (
             ("full_name", lead.full_name),
             ("company_name", lead.company_name),
@@ -102,13 +120,25 @@ class CallProfile:
             ("phone_number", lead.phone_number),
         ):
             if (value or "").strip():
-                lead_lines.append(f"  {label}: {value.strip()}")
+                lead_bits.append(f"{label}={value.strip()}")
+        if compact:
+            lead_block = ", ".join(lead_bits) if lead_bits else "(none)"
+            desc = (self.business_description or "").strip()
+            company_bit = (
+                f"{self.business_name} ({desc})" if desc else self.business_name
+            )
+            return (
+                "CALL PROFILE facts (paraphrase; not a script): "
+                f"agent={self.agent_name}; company={company_bit}; "
+                f"products={product_lines}; source={source_block}; "
+                f"contact={lead_block}."
+            )
+
         lead_block = (
-            "\n".join(lead_lines)
-            if lead_lines
+            "\n".join(f"  {bit.replace('=', ': ', 1)}" for bit in lead_bits)
+            if lead_bits
             else "  (no prefilled lead details — ask for name and handle missing info gracefully)"
         )
-
         return (
             "CALL PROFILE (internal facts — paraphrase naturally; do not read as a script):\n"
             f"- Agent name: {self.agent_name}\n"
