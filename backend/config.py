@@ -124,7 +124,7 @@ class Settings(BaseSettings):
     # Example with openai-compatible: PHONE_LLM_MODEL=gpt-4o-mini
     phone_llm_model: str = ""
     # Shorter phone completions (Gather path). 0 falls back to llm_max_tokens or 140.
-    phone_llm_max_tokens: int = 200
+    phone_llm_max_tokens: int = 320
     phone_llm_temperature: float = 0.4
     # Compact system prompt on phone transports (less TTFT).
     phone_prompt_compact: bool = True

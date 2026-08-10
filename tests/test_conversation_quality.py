@@ -1,5 +1,7 @@
 """Guards for name salvage, bogus email refusal, and truncated LLM JSON."""
 
+import json
+
 import httpx
 import pytest
 
@@ -53,6 +55,50 @@ def test_salvage_truncated_structured_json():
     assert "4 PM" in parsed.assistant_message
     assert parsed.extracted_fields["preferred_contact_time"] == "today 4:00 PM"
     assert parsed.conversation_complete is True
+
+
+def test_salvage_truncated_inside_extracted_fields_with_int_value():
+    """Live failure: cut mid-extracted_fields with team_size as a number."""
+    raw = (
+        '{\n  "assistant_message": "Got it - about 20 people on the team. '
+        'Do you already use a CRM?",\n'
+        '  "detected_language": "en",\n'
+        '  "extracted_fields": {\n'
+        '    "team_size": 20,\n'
+        '    "preferred_contact_method'
+    )
+    parsed = parse_structured_response(raw)
+    assert parsed is not None
+    assert "20" in parsed.assistant_message
+    assert parsed.extracted_fields.get("team_size") == "20"
+    assert parsed.conversation_complete is False
+    assert "preferred_contact_method" not in parsed.extracted_fields
+    assert "conversation_complete" not in parsed.extracted_fields
+
+
+def test_coerce_nested_bools_and_junk_fields():
+    raw = json.dumps(
+        {
+            "assistant_message": "Thanks — noted.",
+            "detected_language": "en",
+            "extracted_fields": {
+                "team_size": 20,
+                "conversation_complete": False,
+                "needs_confirmation": False,
+                "made_up_field": "nope",
+                "email": "__refused__",
+            },
+            "fields_to_clear": [],
+            "next_state": "discovery",
+            "conversation_complete": False,
+            "needs_confirmation": False,
+        }
+    )
+    parsed = parse_structured_response(raw)
+    assert parsed is not None
+    assert parsed.extracted_fields["team_size"] == "20"
+    assert "made_up_field" not in parsed.extracted_fields
+    assert parsed.conversation_complete is False
 
 
 @pytest.mark.asyncio
