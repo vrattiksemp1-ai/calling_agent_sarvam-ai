@@ -127,12 +127,18 @@ def detect_explicit_language_switch(text: str | None) -> str | None:
         "hindi me",
         "in hindi",
         "speak hindi",
+        "speaking hindi",
         "talk in hindi",
+        "can you speak in hindi",
+        "can you speak hindi",
         "hindi bolo",
         "hindima",
         "हिंदी में",
         "हिन्दी में",
+        "हिन्दी",
         "હિન્દી",
+        "સ્પીક હિન્દી",
+        "હિન્દીમાં",
     )
     gu_patterns = (
         "gujarati mein",
@@ -140,11 +146,14 @@ def detect_explicit_language_switch(text: str | None) -> str | None:
         "gujarati ma",
         "in gujarati",
         "speak gujarati",
+        "speaking gujarati",
         "talk in gujarati",
         "gujarati bolo",
         "gujarati maa",
         "ગુજરાતીમાં",
         "ગુજરાતી માં",
+        "પીકિંગ ગુજરાતી",
+        "स्पीक गुजराती",
         "गुजराती में",
     )
     for p in en_patterns:

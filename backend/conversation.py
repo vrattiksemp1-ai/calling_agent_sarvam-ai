@@ -35,7 +35,7 @@ from backend.language_utils import (
 )
 from backend.metrics import persist_turn_telemetry
 from backend.pipeline_trace import trace
-from backend.prompts import REFUSAL_TOKEN
+from backend.prompts import REFUSAL_TOKEN, language_script_repair_instruction
 from backend.providers.llm_client import LlmClient
 from backend.schemas import LeadOut
 from backend.sentiment import rolling_transcript_style
@@ -112,6 +112,17 @@ _ASKING_RE = re.compile(
     r"કરી\s*શકું|कर\s*सकूं|shall\s+i|can\s+i\s+call)",
     re.I,
 )
+_AGENT_NAME_Q = re.compile(
+    r"(your\s+name|what\s+is\s+your\s+name|who\s+are\s+you|may\s+i\s+know\s+your\s+name|"
+    r"आप(?:का|की)?\s*नाम|आप\s*कौन|तुम(?:्हार)?ा\s*नाम|"
+    r"તમારું\s*નામ|તમે\s*કોણ)",
+    re.IGNORECASE,
+)
+_MIDCALL_INDIC_REINTRO = re.compile(
+    r"હું\s+.{0,80}(માંથી|થી).{0,50}છું|"
+    r"मैं\s+.{0,80}से\s+.{0,50}(हूँ|हूं|हू)",
+    re.IGNORECASE,
+)
 
 
 def utcnow() -> datetime:
@@ -145,6 +156,10 @@ def looks_like_source_question(text: str | None) -> bool:
 
 def looks_like_service_question(text: str | None) -> bool:
     return bool(text and _SERVICE_Q.search(text))
+
+
+def looks_like_agent_name_question(text: str | None) -> bool:
+    return bool(text and _AGENT_NAME_Q.search(text))
 
 
 def looks_like_reintroduction(
@@ -198,6 +213,10 @@ def looks_like_reintroduction(
         tl,
     ):
         return True
+    if _MIDCALL_INDIC_REINTRO.search(t):
+        if _CONTINUATION_RE.search(t) and not _TIME_ASK_RE.search(t):
+            return False
+        return True
     return False
 
 
@@ -221,6 +240,7 @@ def continuity_reply(
     full_name: str = "",
     user_text: str | None = None,
     abandoning: bool = False,
+    agent_name: str = "",
 ) -> str:
     """Deterministic spoken line when the model restarts or abandons badly."""
     from backend.telephony.call_manager import fallback_text
@@ -238,6 +258,22 @@ def continuity_reply(
 
     biz = business_name or "our team"
     name = (full_name or "").strip()
+    agent = (agent_name or "Shivangi").strip()
+
+    if looks_like_agent_name_question(user_text):
+        if lang == "hi":
+            return f"मैं {agent} हूँ, {biz} से बोल रही हूँ।"
+        if lang == "gu":
+            return f"હું {agent} છું, {biz} માંથી બોલું છું."
+        return f"I'm {agent}, calling from {biz}."
+
+    switch = detect_explicit_language_switch(user_text)
+    if switch and switch == lang and user_text and len(user_text.strip().split()) <= 4:
+        if lang == "hi":
+            return "बिल्कुल, हम हिंदी में बात करते हैं।"
+        if lang == "gu":
+            return "ચોક્કસ, આપણે ગુજરાતીમાં વાત કરીએ."
+        return "Sure, we can continue in English."
 
     if looks_like_source_question(user_text):
         if lang == "gu":
@@ -317,10 +353,12 @@ def build_progress_hints(
             "Do NOT ask again if they have time / a couple of minutes."
         )
     if (fields.get("full_name") or "").strip():
-        hints.append(
-            f"Caller's name is already known: {fields['full_name'].strip()}. "
-            "Use it; do not re-ask for name."
-        )
+        fn = fields["full_name"].strip()
+        if fn.lower() not in {"__pending__", "pending", "__refused__", "refused"}:
+            hints.append(
+                f"Caller's name is already known: {fn}. "
+                "Use it; do not re-ask for name."
+            )
     elif infer_full_name_from_text(user_text):
         hints.append(
             "Caller just gave their name in this utterance — set extracted_fields.full_name."
@@ -334,6 +372,22 @@ def build_progress_hints(
         hints.append(
             "Caller asked to speak English. Switch to English THIS turn and continue "
             "the same call — do not re-introduce yourself."
+        )
+    switch = detect_explicit_language_switch(user_text)
+    if switch == "hi":
+        hints.append(
+            "Caller asked to speak Hindi. Reply entirely in Hindi (Devanagari) THIS "
+            "turn and continue the same call — do not re-introduce yourself."
+        )
+    elif switch == "gu":
+        hints.append(
+            "Caller asked to speak Gujarati. Reply entirely in Gujarati THIS turn and "
+            "continue the same call — do not re-introduce yourself."
+        )
+    if looks_like_agent_name_question(user_text):
+        hints.append(
+            f"Caller asked your name. Answer briefly: you are {agent_name} from "
+            f"{business_name}. Do not restart the opening pitch."
         )
     return "\n".join(f"- {h}" for h in hints)
 
@@ -514,6 +568,8 @@ class ConversationEngine:
                 continue
             if value in {"", "null", "None", "none", "pending"}:
                 continue
+            if value.lower() in {"__pending__", "__skip__"}:
+                continue
             old_value = getattr(lead, name)
             if old_value and old_value != value:
                 db.add(
@@ -664,6 +720,56 @@ class ConversationEngine:
                 "The assistant could not produce a structured reply.",
                 details=error,
             )
+        return parsed
+
+    async def _retry_language_script(
+        self,
+        db: OrmSession,
+        session: Session,
+        lead: Lead | None,
+        user_text: str,
+        history: list[dict],
+        timings,
+        language: str,
+    ):
+        """One fast LLM retry when the reply script does not match the pin."""
+        compact = self._use_compact_prompt(timings)
+        phone_kwargs = self._phone_llm_kwargs(timings)
+        progress_hints = build_progress_hints(
+            history,
+            self._lead_fields(lead),
+            user_text,
+            agent_name=self._call_profile.agent_name,
+            business_name=self._call_profile.business_name,
+        )
+        timings.llm_attempt_count += 1
+        messages = prompts.build_messages(
+            history,
+            self._lead_fields(lead),
+            list(session.skipped_fields or []),
+            session.current_state,
+            repair=False,
+            language=language,
+            style_signal=None if compact else rolling_transcript_style(history),
+            progress_hints=progress_hints,
+            **self._prompt_kwargs(compact=compact),
+        )
+        messages.append(
+            {
+                "role": "user",
+                "content": language_script_repair_instruction(language),
+            }
+        )
+        raw, latency, usage = await self._llm.generate(
+            messages,
+            max_retries=0,
+            **phone_kwargs,
+        )
+        timings.llm_latency_ms += latency
+        timings.llm_usage = usage
+        parsed = parse_structured_response(raw)
+        if parsed is not None:
+            timings.mark("llm_completed")
         return parsed
 
     async def generate_greeting(
@@ -827,17 +933,69 @@ class ConversationEngine:
                 parsed.detected_language = "en"
                 timings.language_repair = "model_language_switch"
             else:
-                logger.warning(
-                    "LLM reply language mismatched pin=%s; using fast fallback",
+                repaired = await self._retry_language_script(
+                    db,
+                    session,
+                    lead,
+                    user_text,
+                    history,
+                    timings,
                     turn_language,
                 )
-                from backend.telephony.call_manager import fallback_text
+                if (
+                    repaired
+                    and not self._reply_language_mismatch(
+                        repaired.assistant_message or "", turn_language
+                    )
+                ):
+                    parsed = repaired
+                    session.language = turn_language
+                    parsed.detected_language = turn_language
+                    timings.language_repair = "language_script_retry"
+                    logger.info("Recovered wrong-script reply with language retry")
+                else:
+                    biz = self._call_profile.business_name
+                    agent = self._call_profile.agent_name
+                    name_hint = (
+                        (lead.full_name or "").strip()
+                        or (infer_full_name_from_text(user_text) or "")
+                    )
+                    if looks_like_agent_name_question(user_text):
+                        parsed.assistant_message = continuity_reply(
+                            language=turn_language,
+                            business_name=biz,
+                            agent_name=agent,
+                            full_name=name_hint,
+                            user_text=user_text,
+                        )
+                        parsed.detected_language = turn_language
+                        session.language = turn_language
+                        timings.language_repair = "agent_name_continuity"
+                    elif detect_explicit_language_switch(user_text) == turn_language:
+                        parsed.assistant_message = continuity_reply(
+                            language=turn_language,
+                            business_name=biz,
+                            agent_name=agent,
+                            full_name=name_hint,
+                            user_text=user_text,
+                        )
+                        parsed.detected_language = turn_language
+                        session.language = turn_language
+                        timings.language_repair = "language_switch_ack"
+                    else:
+                        logger.warning(
+                            "LLM reply language mismatched pin=%s; using fast fallback",
+                            turn_language,
+                        )
+                        from backend.telephony.call_manager import fallback_text
 
-                parsed.assistant_message = fallback_text("repeat", turn_language)
-                parsed.detected_language = turn_language
-                session.language = turn_language
-                timings.language_repair = "localized_repeat_fallback"
-                timings.fallback_count += 1
+                        parsed.assistant_message = fallback_text(
+                            "repeat", turn_language
+                        )
+                        parsed.detected_language = turn_language
+                        session.language = turn_language
+                        timings.language_repair = "localized_repeat_fallback"
+                        timings.fallback_count += 1
 
         # Continuity guards: no exact repeats, no re-intros, clean abandon audio.
         prior_assistant = [
@@ -860,17 +1018,29 @@ class ConversationEngine:
             parsed.assistant_message = continuity_reply(
                 language=lang,
                 business_name=biz,
+                agent_name=agent,
                 full_name=name_hint,
                 user_text=user_text,
             )
             current = parsed.assistant_message
             logger.info("Forced first-person source answer")
+        elif prior_assistant and looks_like_agent_name_question(user_text):
+            parsed.assistant_message = continuity_reply(
+                language=lang,
+                business_name=biz,
+                agent_name=agent,
+                full_name=name_hint,
+                user_text=user_text,
+            )
+            current = parsed.assistant_message
+            logger.info("Forced agent name answer")
         elif prior_assistant and current and looks_like_reintroduction(
             current, agent_name=agent, business_name=biz
         ):
             parsed.assistant_message = continuity_reply(
                 language=lang,
                 business_name=biz,
+                agent_name=agent,
                 full_name=name_hint,
                 user_text=user_text,
             )

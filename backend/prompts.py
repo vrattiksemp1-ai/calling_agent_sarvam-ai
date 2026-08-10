@@ -234,6 +234,25 @@ REPAIR_INSTRUCTION = (
     "object matching the required schema. No prose, no markdown fences."
 )
 
+LANGUAGE_SCRIPT_HINTS = {
+    "en": ("English", "Latin English"),
+    "hi": ("Hindi", "Devanagari Hindi"),
+    "gu": ("Gujarati", "Gujarati script"),
+}
+
+
+def language_script_repair_instruction(lang: str) -> str:
+    """Extra user turn when the model wrote the wrong script for a pinned language."""
+    code = (lang or "").strip().lower()
+    name, script = LANGUAGE_SCRIPT_HINTS.get(code, (code, code))
+    return (
+        f"\n\nYour previous assistant_message used the wrong language/script. "
+        f"Reply with ONLY valid JSON. Write assistant_message entirely in {name} "
+        f"({script}). Set detected_language to \"{code}\". "
+        f"Continue the same conversation — answer the caller's latest message; "
+        f"do NOT ask them to repeat."
+    )
+
 # Shorter phone/Gather prompt — same BDE behavior, less TTFT.
 PHONE_SYSTEM_PROMPT_COMPACT = """You are {agent_name}, a warm BDE-style phone caller for {business_name}.
 Speak naturally like a real sales call. ONE short question per turn. 1 sentence preferred, max 2.
@@ -267,6 +286,9 @@ next_state may move forward or stay; never jump backward in the flow.
 End/busy/callback: save preferred_contact_time when given; goodbye + abandoned when ending.
 Consent/summary rules still apply when basics are known.
 Keep JSON complete and short so it is not truncated.
+extracted_fields: ONLY fields the user just gave this turn; ALL values must be
+strings (e.g. "20" not 20). Do not invent fields or put "{refusal}" unless they
+clearly refused. Prefer empty {{ }} over a long field bag.
 
 Reply with ONE JSON object only:
 {{

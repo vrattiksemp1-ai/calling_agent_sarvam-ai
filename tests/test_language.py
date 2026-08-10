@@ -337,3 +337,100 @@ async def test_process_turn_pins_stt_language(tmp_path):
     assert "The caller speaks Hindi. Reply entirely in Hindi." in system
     with factory() as db:
         assert db.get(Session, session.id).language == "hi"
+
+
+@pytest.mark.asyncio
+async def test_hindi_switch_retries_wrong_script_instead_of_say_again(tmp_path):
+    from backend.database import create_engine_and_session
+
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return structured_json(
+                "ટેકનો વિશે વધુ જાણવા માટે, તમે કયા પ્રકારના કાર્યો માટે તેનો ઉપયોગ કરો છો?",
+                detected_language="hi",
+                extracted_fields={},
+                next_state="collecting_business_context",
+            )
+        return structured_json(
+            "ठीक है, टेकनो के लिए आप किस तरह के काम में उसका इस्तेमाल करते हैं?",
+            detected_language="hi",
+            extracted_fields={},
+            next_state="collecting_business_context",
+        )
+
+    settings = make_settings(tmp_path)
+    llm = make_mock_llm_client(settings, handler)
+    _, factory = create_engine_and_session(
+        f"sqlite:///{str(tmp_path / 'hi_retry.db').replace(chr(92), '/')}"
+    )
+    with factory() as db:
+        session = Session(language="gu", current_state="collecting_business_context")
+        db.add(session)
+        db.commit()
+        session_id = session.id
+    engine = ConversationEngine(llm)
+    timings = TurnTimings()
+    with factory() as db:
+        session = db.get(Session, session_id)
+        _, parsed = await engine.process_turn(db, session, "હિન્દી", timings)
+        db.commit()
+        assert parsed.detected_language == "hi"
+        assert "ठीक" in parsed.assistant_message or "टेकनो" in parsed.assistant_message
+        assert "સોરી" not in parsed.assistant_message
+        assert calls == 2
+        assert timings.language_repair == "language_script_retry"
+
+
+@pytest.mark.asyncio
+async def test_agent_name_question_answered_in_hindi(tmp_path):
+    from backend.database import create_engine_and_session
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return structured_json(
+            "હું શિવાંગી છું, વ્રત્તિક્સથી.",
+            detected_language="hi",
+            extracted_fields={},
+            next_state="collecting_business_context",
+        )
+
+    settings = make_settings(tmp_path)
+    llm = make_mock_llm_client(settings, handler)
+    _, factory = create_engine_and_session(
+        f"sqlite:///{str(tmp_path / 'agent_name.db').replace(chr(92), '/')}"
+    )
+    with factory() as db:
+        session = Session(language="gu", current_state="collecting_business_context")
+        lead = __import__("backend.models", fromlist=["Lead"]).Lead(
+            session_id=session.id, full_name="અક્ષય પટેલ"
+        )
+        session.lead = lead
+        db.add(session)
+        db.add(lead)
+        db.commit()
+        session_id = session.id
+    engine = ConversationEngine(llm)
+    with factory() as db:
+        session = db.get(Session, session_id)
+        _, parsed = await engine.process_turn(
+            db, session, "आपका नाम क्या है?", TurnTimings()
+        )
+        db.commit()
+        assert "Shivangi" in parsed.assistant_message or "शिवांगी" in parsed.assistant_message
+        assert "सुनाई" not in parsed.assistant_message
+
+
+def test_blocks_gujarati_reintro_after_name():
+    from backend.conversation import looks_like_reintroduction
+
+    reply = (
+        "ખૂબ સરસ, અક્ષય. હું વ્રત્તિક્સથી શિવાંગી છું. "
+        "શું તમે અત્યારે કોઈ ચોક્કસ પ્રોજેક્ટ પર કામ કરી રહ્યા છો?"
+    )
+    assert looks_like_reintroduction(
+        reply, agent_name="Shivangi", business_name="Vrattiks"
+    )
+
