@@ -143,3 +143,46 @@ class StreamingTextChunker:
     def flush(self) -> str:
         chunk, self._buffer = self._buffer.strip(), ""
         return chunk
+
+
+class FirstSpeechChunkBuffer:
+    """Emit the first complete sentence from an incremental text stream.
+
+    A bounded word-boundary fallback prevents a punctuation-free model reply
+    from delaying speech indefinitely.
+    """
+
+    _TERMINATORS = frozenset((".", "?", "!", "।", "॥", "\n"))
+
+    def __init__(self, minimum_chars: int = 8, maximum_chars: int = 120) -> None:
+        self._buffer = ""
+        self._minimum = minimum_chars
+        self._maximum = maximum_chars
+        self._emitted = False
+
+    def feed(self, text: str) -> str:
+        if self._emitted or not text:
+            return ""
+        self._buffer += text
+
+        for index, char in enumerate(self._buffer):
+            end = index + 1
+            if end >= self._minimum and char in self._TERMINATORS:
+                return self._emit(end)
+
+        if len(self._buffer) < self._maximum:
+            return ""
+        split = max(
+            self._buffer.rfind(mark, 0, self._maximum + 1)
+            for mark in (" ", "\t")
+        )
+        end = split if split >= self._minimum else self._maximum
+        return self._emit(end)
+
+    def _emit(self, end: int) -> str:
+        chunk = self._buffer[:end].strip()
+        if not chunk:
+            return ""
+        self._emitted = True
+        self._buffer = self._buffer[end:]
+        return chunk

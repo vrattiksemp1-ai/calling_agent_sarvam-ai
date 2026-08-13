@@ -14,7 +14,10 @@ from backend.metrics import TurnTimings
 from backend.models import Lead, Session
 from backend.providers.llm_client import LlmClient
 from backend.providers.sarvam_client import SarvamClient, SarvamSttEvent
-from backend.streaming_json import AssistantMessageStreamParser
+from backend.streaming_json import (
+    AssistantMessageStreamParser,
+    FirstSpeechChunkBuffer,
+)
 from backend.telephony.call_manager import CallRegistry, CallSession
 from backend.telephony.endpointing import SemanticEndpointing
 from tests.conftest import make_settings
@@ -222,6 +225,16 @@ def test_streaming_json_parser_handles_gujarati_unicode_and_escapes():
     output = "".join(parser.feed(raw[index : index + 3]) for index in range(0, len(raw), 3))
     parser.finish()
     assert output == 'કેમ છો? તમારું નામ "શું"?\n'
+
+
+def test_first_speech_chunk_waits_for_sentence_and_has_bounded_fallback():
+    sentence = FirstSpeechChunkBuffer()
+    assert sentence.feed("Thanks for your ") == ""
+    assert sentence.feed("time. What is your name?") == "Thanks for your time."
+    assert sentence.feed(" This is ignored.") == ""
+
+    bounded = FirstSpeechChunkBuffer(minimum_chars=8, maximum_chars=16)
+    assert bounded.feed("This reply has no punctuation yet") == "This reply has"
 
 
 def test_semantic_endpointing_handles_complete_and_incomplete_clauses():

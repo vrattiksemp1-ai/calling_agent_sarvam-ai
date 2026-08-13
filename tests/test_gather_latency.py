@@ -1,15 +1,24 @@
 """Gather-optimized Phase 2 latency knobs."""
 
+import asyncio
 import json
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
 
 from backend.call_profile import CallProfile, ProductOffering
 from backend.conversation import ConversationEngine
+from backend.database import create_engine_and_session
 from backend.metrics import TurnTimings
 from backend.prompts import build_messages, build_system_prompt
-from backend.telephony.turn_flow import TURN_INLINE_BUDGET_SECONDS, TURN_POLL_PAUSE_SECONDS
+from backend.telephony.call_manager import CallRegistry
+from backend.telephony.turn_flow import (
+    TURN_INLINE_BUDGET_SECONDS,
+    TURN_POLL_PAUSE_SECONDS,
+    TurnFlow,
+)
 from tests.conftest import make_mock_llm_client, make_settings, structured_json
 
 
@@ -56,10 +65,6 @@ def test_compact_messages_skip_glossary_and_trim_history():
 
 
 def test_turn_flow_gather_attrs_use_settings(tmp_path):
-    from backend.telephony.turn_flow import TurnFlow
-    from backend.telephony.call_manager import CallRegistry
-    from unittest.mock import MagicMock
-
     settings = make_settings(
         tmp_path,
         gather_speech_timeout="1",
@@ -88,6 +93,73 @@ def test_turn_flow_gather_attrs_use_settings(tmp_path):
     twiml = flow._pending_redirect_twiml(pending)
     assert "<Pause" not in twiml
     assert "<Redirect" in twiml
+
+
+@pytest.mark.asyncio
+async def test_gather_speaks_first_sentence_before_llm_completion(tmp_path):
+    class EarlyEngine:
+        def __init__(self):
+            self.release = asyncio.Event()
+
+        async def process_turn(
+            self, db, session, text, timings, on_assistant_chunk=None
+        ):
+            assert on_assistant_chunk is not None
+            await on_assistant_chunk("Thanks for calling. What is ")
+            await on_assistant_chunk("your name?")
+            await self.release.wait()
+            return None, SimpleNamespace(
+                assistant_message="Thanks for calling. What is your name?",
+                detected_language="en",
+            )
+
+    class StreamingSarvam:
+        def __init__(self):
+            self.texts = []
+            self.last_attempt_count = 1
+
+        async def stream_synthesize(self, text, detected_language=None):
+            self.texts.append(text)
+            yield b"RIFF-test-audio"
+
+    settings = make_settings(
+        tmp_path,
+        llm_streaming_enabled=True,
+        sarvam_tts_streaming=True,
+        gather_inline_budget_seconds=1.0,
+    )
+    _, factory = create_engine_and_session(settings.database_url)
+    engine = EarlyEngine()
+    sarvam = StreamingSarvam()
+    twilio = MagicMock()
+    twilio.turn_url.return_value = "https://example.test/turn"
+    twilio.turn_result_url.return_value = "https://example.test/turn-result"
+    twilio.audio_url.side_effect = (
+        lambda token: f"https://example.test/audio/{token}"
+    )
+    flow = TurnFlow(
+        settings=settings,
+        session_factory=factory,
+        engine=engine,
+        sarvam=sarvam,
+        twilio=twilio,
+        registry=CallRegistry(),
+    )
+
+    first = await flow.process_webhook("CA-speak-early", "hello")
+    assert "<Play>https://example.test/audio/" in first
+    assert "<Redirect" in first
+    assert "<Gather" not in first
+    assert sarvam.texts == ["Thanks for calling."]
+
+    engine.release.set()
+    pending = flow._pending_turns["CA-speak-early"]
+    second = await flow.poll_pending_turn("CA-speak-early", pending.token)
+    assert "<Gather" in second
+    assert sarvam.texts == [
+        "Thanks for calling.",
+        "What is your name?",
+    ]
 
 
 @pytest.mark.asyncio

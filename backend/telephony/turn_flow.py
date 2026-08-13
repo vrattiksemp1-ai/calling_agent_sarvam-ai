@@ -35,6 +35,7 @@ from backend.call_profile import build_call_profile
 from backend.models import Lead, Message, Session
 from backend.pipeline_trace import trace
 from backend.providers.sarvam_client import SarvamClient
+from backend.streaming_json import FirstSpeechChunkBuffer
 from backend.telephony.call_manager import (
     CallRecord,
     CallRegistry,
@@ -117,6 +118,10 @@ class PendingTurn:
     task: asyncio.Task | None = None
     created_at: float = field(default_factory=time.monotonic)
     timings: TurnTimings | None = None
+    early_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    early_twiml: str | None = None
+    early_text: str = ""
+    early_delivered: bool = False
 
 
 class TurnFlow:
@@ -225,6 +230,63 @@ class TurnFlow:
             f'<Redirect method="POST">{_escape(url)}</Redirect>'
             "</Response>"
         )
+
+    def _early_reply_twiml(self, pending: PendingTurn, audio_url: str) -> str:
+        """Play the first generated sentence, then fetch the completed turn."""
+        result_url = self._twilio.turn_result_url(
+            pending.call_sid, pending.token
+        )
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            "<Response>"
+            f"<Play>{_escape(audio_url)}</Play>"
+            f'<Redirect method="POST">{_escape(result_url)}</Redirect>'
+            "</Response>"
+        )
+
+    async def _wait_for_pending_progress(
+        self, pending: PendingTurn, timeout: float
+    ) -> str:
+        """Wait until early audio, the full turn, or the webhook budget wins."""
+        done_wait = asyncio.create_task(pending.done.wait())
+        early_wait = (
+            asyncio.create_task(pending.early_ready.wait())
+            if not pending.early_delivered
+            else None
+        )
+        waiters = {done_wait}
+        if early_wait is not None:
+            waiters.add(early_wait)
+        try:
+            finished, _ = await asyncio.wait(
+                waiters,
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not finished:
+                return "timeout"
+            if (
+                pending.early_ready.is_set()
+                and pending.early_twiml
+                and not pending.early_delivered
+            ):
+                return "early"
+            return "done" if pending.done.is_set() else "timeout"
+        finally:
+            if early_wait is not None:
+                early_wait.cancel()
+            done_wait.cancel()
+
+    @staticmethod
+    def _take_early_twiml(pending: PendingTurn) -> str | None:
+        if (
+            pending.early_delivered
+            or not pending.early_ready.is_set()
+            or not pending.early_twiml
+        ):
+            return None
+        pending.early_delivered = True
+        return pending.early_twiml
 
     def _say_gather_twiml(self, text: str, language: str | None = None) -> str:
         """Gather after a short English <Say>.
@@ -708,9 +770,8 @@ class TurnFlow:
         # Keep the Twilio webhook tiny. If the reply is ready almost immediately
         # we return it inline; otherwise Redirect before Twilio's ~15s cap.
         inline_budget = self._inline_budget_seconds()
-        try:
-            await asyncio.wait_for(pending.done.wait(), timeout=inline_budget)
-        except asyncio.TimeoutError:
+        progress = await self._wait_for_pending_progress(pending, inline_budget)
+        if progress == "timeout":
             content = self._pending_redirect_twiml(pending)
             if pending.timings is not None:
                 pending.timings.log(logger, event="turn_redirected")
@@ -727,6 +788,16 @@ class TurnFlow:
                 pause_s=self._poll_pause_seconds(),
             )
             return content
+
+        early_twiml = self._take_early_twiml(pending)
+        if early_twiml is not None:
+            trace(
+                "gather.turn.speak_early",
+                call_sid=call_sid,
+                turn_id=pending.timings.turn_id if pending.timings else None,
+                text=pending.early_text,
+            )
+            return early_twiml
 
         self._pending_turns.pop(call_sid, None)
         if pending.timings is not None:
@@ -791,9 +862,10 @@ class TurnFlow:
             call_sid,
             pending.done.is_set(),
         )
-        try:
-            await asyncio.wait_for(pending.done.wait(), timeout=TURN_POLL_WAIT_SECONDS)
-        except asyncio.TimeoutError:
+        progress = await self._wait_for_pending_progress(
+            pending, TURN_POLL_WAIT_SECONDS
+        )
+        if progress == "timeout":
             if pending.timings is not None:
                 pending.timings.add_duration(
                     "redirect_poll_delay",
@@ -817,6 +889,17 @@ class TurnFlow:
                 "redirect_poll_delay",
                 int((time.monotonic() - poll_started) * 1000),
             )
+        early_twiml = self._take_early_twiml(pending)
+        if early_twiml is not None:
+            trace(
+                "gather.turn.speak_early",
+                call_sid=call_sid,
+                turn_id=pending.timings.turn_id if pending.timings else None,
+                text=pending.early_text,
+                poll=pending.polls,
+            )
+            return early_twiml
+
         self._pending_turns.pop(call_sid, None)
         if pending.timings is not None:
             pending.timings.log(logger)
@@ -852,6 +935,7 @@ class TurnFlow:
         completed = False
         abandoned = False
         reply_url: str | None = None
+        remaining_reply = ""
 
         with session_scope(self._factory) as db:
             session = db.get(Session, record.session_id) if record.session_id else None
@@ -876,8 +960,65 @@ class TurnFlow:
             timings.session_id = session.id
             timings.transcript_char_count = len(text)
             timings.mark("transcript_received")
-            _, parsed = await self._engine.process_turn(db, session, text, timings)
+            first_chunk = FirstSpeechChunkBuffer()
+            use_speak_early = bool(
+                pending is not None
+                and self._settings.llm_streaming_enabled
+                and self._settings.sarvam_tts_streaming
+            )
+
+            async def speak_early(fragment: str) -> None:
+                if pending is None or pending.early_text:
+                    return
+                sentence = first_chunk.feed(fragment)
+                if not sentence:
+                    return
+                trace(
+                    "gather.tts.early_start",
+                    call_sid=call_sid,
+                    turn_id=timings.turn_id,
+                    language=detected_language,
+                    text=sentence,
+                )
+                audio_url, tts_ms = await self._stream_tts(
+                    sentence, detected_language, timings
+                )
+                if not audio_url:
+                    return
+                pending.early_text = sentence
+                pending.early_twiml = self._early_reply_twiml(
+                    pending, audio_url
+                )
+                pending.early_ready.set()
+                trace(
+                    "gather.tts.early_ready",
+                    call_sid=call_sid,
+                    turn_id=timings.turn_id,
+                    tts_ms=tts_ms,
+                    audio_url=audio_url,
+                )
+
+            process_kwargs = {}
+            if use_speak_early:
+                process_kwargs["on_assistant_chunk"] = speak_early
+            _, parsed = await self._engine.process_turn(
+                db, session, text, timings, **process_kwargs
+            )
             reply = parsed.assistant_message or ""
+            remaining_reply = reply
+            if pending is not None and pending.early_text:
+                prefix_at = reply.find(
+                    pending.early_text, 0, len(pending.early_text) + 8
+                )
+                if prefix_at >= 0:
+                    remaining_reply = reply[
+                        prefix_at + len(pending.early_text) :
+                    ].lstrip()
+                else:
+                    logger.warning(
+                        "Early spoken text did not match completed reply; "
+                        "playing the validated reply in full."
+                    )
             timings.response_char_count = len(reply)
             if getattr(parsed, "detected_language", None):
                 detected_language = parsed.detected_language
@@ -899,26 +1040,31 @@ class TurnFlow:
             )
 
             if not completed and not abandoned:
-                trace(
-                    "gather.tts.start",
-                    call_sid=call_sid,
-                    turn_id=timings.turn_id,
-                    language=detected_language,
-                    text=reply,
-                )
-                reply_url, tts_ms = await self._stream_tts(
-                    reply, detected_language, timings
-                )
-                trace(
-                    "gather.tts.done",
-                    call_sid=call_sid,
-                    turn_id=timings.turn_id,
-                    tts_ms=tts_ms,
-                    audio_url=reply_url,
-                    mode=timings.tts_mode,
-                )
-                if reply_url:
-                    timings.tts_latency_ms = tts_ms
+                tts_ms = 0
+                if remaining_reply:
+                    trace(
+                        "gather.tts.start",
+                        call_sid=call_sid,
+                        turn_id=timings.turn_id,
+                        language=detected_language,
+                        text=remaining_reply,
+                    )
+                    reply_url, tts_ms = await self._stream_tts(
+                        remaining_reply,
+                        detected_language,
+                        None if pending and pending.early_text else timings,
+                    )
+                    trace(
+                        "gather.tts.done",
+                        call_sid=call_sid,
+                        turn_id=timings.turn_id,
+                        tts_ms=tts_ms,
+                        audio_url=reply_url,
+                        mode=timings.tts_mode,
+                    )
+                if reply_url or (pending is not None and pending.early_text):
+                    if not pending or not pending.early_text:
+                        timings.tts_latency_ms = tts_ms
                     last_assistant = (
                         db.query(Message)
                         .filter(
@@ -941,23 +1087,39 @@ class TurnFlow:
 
         if completed:
             final_url, _ = (
-                await self._stream_tts(reply, detected_language, timings)
-                if reply
+                await self._stream_tts(
+                    remaining_reply,
+                    detected_language,
+                    None if pending and pending.early_text else timings,
+                )
+                if remaining_reply
                 else (None, 0)
             )
             goodbye = fallback_text("goodbye", detected_language)
             goodbye_url, _ = await self._host_tts(goodbye, detected_language)
             self._persist_timings(timings)
-            return self._final_twiml(final_url, goodbye_url, reply, goodbye)
+            return self._final_twiml(
+                final_url, goodbye_url, remaining_reply, goodbye
+            )
 
         if abandoned:
-            farewell = reply or fallback_text("goodbye", detected_language)
-            farewell_url, _ = await self._stream_tts(
-                farewell, detected_language, timings
+            farewell = remaining_reply
+            if not farewell and not (pending and pending.early_text):
+                farewell = fallback_text("goodbye", detected_language)
+            farewell_url, _ = (
+                await self._stream_tts(
+                    farewell,
+                    detected_language,
+                    None if pending and pending.early_text else timings,
+                )
+                if farewell
+                else (None, 0)
             )
             self._persist_timings(timings)
             return self._farewell_twiml(farewell_url, farewell)
 
         return self._gather_twiml(
-            reply_url, reply if reply_url is None else None, language=detected_language
+            reply_url,
+            remaining_reply if reply_url is None else None,
+            language=detected_language,
         )
