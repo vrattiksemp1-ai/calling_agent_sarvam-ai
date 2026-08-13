@@ -186,20 +186,12 @@ async def test_playback_mark_and_interruption_clear_are_observable(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_repair_and_language_mismatch_have_separate_dimensions(tmp_path):
+async def test_language_mismatch_uses_single_llm_attempt(tmp_path):
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        if calls == 1:
-            return httpx.Response(
-                200,
-                json={
-                    "choices": [{"message": {"content": "not valid json"}}],
-                    "usage": {},
-                },
-            )
         return structured_json(
             "This is an English answer that does not match Gujarati.",
             detected_language="gu",
@@ -227,8 +219,9 @@ async def test_repair_and_language_mismatch_have_separate_dimensions(tmp_path):
 
     dimensions = timings.dimensions()
     assert parsed.detected_language == "gu"
-    assert timings.repair_count == 1
-    assert timings.llm_attempt_count == 2
+    assert calls == 1
+    assert timings.repair_count == 0
+    assert timings.llm_attempt_count == 1
     assert dimensions["reasoning_mode"] == "none"
     assert dimensions["language_mismatch"] is True
     assert dimensions["language_repair"] == "localized_repeat_fallback"

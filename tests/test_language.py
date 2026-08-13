@@ -72,7 +72,7 @@ def test_fallback_text_is_language_aware():
     # Greeting emergency shells are fact-based (may be romanized Indic).
     gu = fallback_text("greeting", "gu")
     assert "AI assistant" in gu
-    assert "Shivangi" in gu or "hu " in gu.lower() or "Hello" in gu
+    assert "Shivangi" in gu or "શિવાંગી" in gu or "hu " in gu.lower() or "Hello" in gu
     assert "AI assistant" in fallback_text("greeting", "gujlish")
     assert fallback_text("repeat", "hi")
     bye = " ".join(fallback_text("goodbye", "en") for _ in range(8)).lower()
@@ -340,7 +340,7 @@ async def test_process_turn_pins_stt_language(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_hindi_switch_retries_wrong_script_instead_of_say_again(tmp_path):
+async def test_hindi_switch_wrong_script_does_not_retry_llm(tmp_path):
     from backend.database import create_engine_and_session
 
     calls = 0
@@ -348,15 +348,8 @@ async def test_hindi_switch_retries_wrong_script_instead_of_say_again(tmp_path):
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        if calls == 1:
-            return structured_json(
-                "ટેકનો વિશે વધુ જાણવા માટે, તમે કયા પ્રકારના કાર્યો માટે તેનો ઉપયોગ કરો છો?",
-                detected_language="hi",
-                extracted_fields={},
-                next_state="collecting_business_context",
-            )
         return structured_json(
-            "ठीक है, टेकनो के लिए आप किस तरह के काम में उसका इस्तेमाल करते हैं?",
+            "ટેકનો વિશે વધુ જાણવા માટે, તમે કયા પ્રકારના કાર્યો માટે તેનો ઉપયોગ કરો છો?",
             detected_language="hi",
             extracted_fields={},
             next_state="collecting_business_context",
@@ -379,19 +372,22 @@ async def test_hindi_switch_retries_wrong_script_instead_of_say_again(tmp_path):
         _, parsed = await engine.process_turn(db, session, "હિન્દી", timings)
         db.commit()
         assert parsed.detected_language == "hi"
-        assert "ठीक" in parsed.assistant_message or "टेकनो" in parsed.assistant_message
-        assert "સોરી" not in parsed.assistant_message
-        assert calls == 2
-        assert timings.language_repair == "language_script_retry"
+        assert calls == 1
+        assert timings.llm_attempt_count == 1
+        assert timings.language_repair == "localized_repeat_fallback"
 
 
 @pytest.mark.asyncio
 async def test_agent_name_question_answered_in_hindi(tmp_path):
     from backend.database import create_engine_and_session
 
+    calls = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
         return structured_json(
-            "હું શિવાંગી છું, વ્રત્તિક્સથી.",
+            "मैं शिवांगी हूँ, व्रत्तिक्स से बोल रही हूँ।",
             detected_language="hi",
             extracted_fields={},
             next_state="collecting_business_context",
@@ -419,8 +415,13 @@ async def test_agent_name_question_answered_in_hindi(tmp_path):
             db, session, "आपका नाम क्या है?", TurnTimings()
         )
         db.commit()
-        assert "Shivangi" in parsed.assistant_message or "शिवांगी" in parsed.assistant_message
+        assert (
+            "Shivangi" in parsed.assistant_message
+            or "शिवांगी" in parsed.assistant_message
+            or "શિવાંગી" in parsed.assistant_message
+        )
         assert "सुनाई" not in parsed.assistant_message
+        assert calls == 1
 
 
 def test_blocks_gujarati_reintro_after_name():
