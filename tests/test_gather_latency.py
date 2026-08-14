@@ -96,6 +96,29 @@ def test_turn_flow_gather_attrs_use_settings(tmp_path):
     assert "<Redirect" in twiml
 
 
+def test_mark_audio_outbound_survives_locked_database(tmp_path, monkeypatch):
+    settings = make_settings(tmp_path)
+    _, factory = create_engine_and_session(settings.database_url)
+    flow = TurnFlow(
+        settings=settings,
+        session_factory=factory,
+        engine=MagicMock(),
+        sarvam=MagicMock(),
+        twilio=MagicMock(),
+        registry=CallRegistry(),
+    )
+    timings = TurnTimings(settings=settings, transport="twilio_gather")
+    timings.session_id = "session-1"
+    flow._tts_streams["tok"] = SimpleNamespace(timings=timings)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr("backend.telephony.turn_flow.persist_turn_telemetry", boom)
+    flow.mark_audio_outbound("tok")
+    assert "first_outbound_audio" in timings.phase_elapsed_ms
+
+
 @pytest.mark.asyncio
 async def test_gather_speaks_first_sentence_before_llm_completion(tmp_path):
     class EarlyEngine:

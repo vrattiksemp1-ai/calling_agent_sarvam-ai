@@ -372,10 +372,13 @@ async def test_hindi_switch_wrong_script_does_not_retry_llm(tmp_path):
         session = db.get(Session, session_id)
         _, parsed = await engine.process_turn(db, session, "હિન્દી", timings)
         db.commit()
-        assert parsed.detected_language == "hi"
+        assert parsed.assistant_message.startswith("ટેકનો")
+        assert parsed.detected_language == "gu"
+        assert session.language == "hi"
         assert calls == 1
         assert timings.llm_attempt_count == 1
-        assert timings.language_repair == "localized_repeat_fallback"
+        assert timings.language_repair == "keep_reply_script"
+        assert timings.fallback_count == 0
 
 
 @pytest.mark.asyncio

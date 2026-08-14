@@ -33,6 +33,7 @@ from backend.errors import AppError
 from backend.metrics import TurnTimings, persist_turn_telemetry
 from backend.call_profile import build_call_profile
 from backend.models import Lead, Message, Session
+from backend.language_utils import infer_script_language
 from backend.pipeline_trace import trace
 from backend.providers.sarvam_client import SarvamClient
 from backend.streaming_json import FirstSpeechChunkBuffer
@@ -499,14 +500,20 @@ class TurnFlow:
     def _persist_timings(self, timings: TurnTimings) -> None:
         if not timings.session_id:
             return
-        with session_scope(self._factory) as db:
-            persist_turn_telemetry(db, timings.session_id, timings)
-            if timings.assistant_message_id is not None:
-                message = db.get(Message, timings.assistant_message_id)
-                caller_latency = timings.caller_perceived()
-                if message is not None and caller_latency is not None:
-                    message.total_turn_latency_ms = caller_latency
-                    db.add(message)
+        try:
+            with session_scope(self._factory) as db:
+                persist_turn_telemetry(db, timings.session_id, timings)
+                if timings.assistant_message_id is not None:
+                    message = db.get(Message, timings.assistant_message_id)
+                    caller_latency = timings.caller_perceived()
+                    if message is not None and caller_latency is not None:
+                        message.total_turn_latency_ms = caller_latency
+                        db.add(message)
+        except Exception:
+            logger.warning(
+                "Could not persist turn timings (audio playback continues)",
+                exc_info=True,
+            )
 
     # ---------- entry points ----------
 
@@ -973,15 +980,18 @@ class TurnFlow:
                 sentence = first_chunk.feed(fragment)
                 if not sentence:
                     return
+                tts_language = (
+                    infer_script_language(sentence) or detected_language
+                )
                 trace(
                     "gather.tts.early_start",
                     call_sid=call_sid,
                     turn_id=timings.turn_id,
-                    language=detected_language,
+                    language=tts_language,
                     text=sentence,
                 )
                 audio_url, tts_ms = await self._stream_tts(
-                    sentence, detected_language, timings
+                    sentence, tts_language, timings
                 )
                 if not audio_url:
                     return

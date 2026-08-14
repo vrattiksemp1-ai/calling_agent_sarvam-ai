@@ -157,7 +157,7 @@ All settings come from environment variables or a local `.env` file. See
 | `PHONE_LLM_REASONING_EFFORT` | `none` | Disable hidden reasoning on latency-sensitive phone turns |
 | `MAX_AUDIO_MB` | `15` | Max upload size |
 | `RETAIN_AUDIO` | `false` | Keep normalized WAVs in `storage/tmp/retained` |
-| `DATABASE_URL` | `sqlite:///./data/sarvam_leads.db` | SQLite location |
+| `DATABASE_URL` | `postgresql+psycopg2://postgres:postgres@localhost:5432/sarvam_leads` | PostgreSQL (Compose starts the DB) |
 | `STT_RATE_PER_HOUR_INR` | `30` | STT cost estimate per audio hour |
 | `TTS_RATE_PER_10K_CHARS_INR` | `30` | TTS cost estimate per 10k chars |
 | `LLM_INPUT_RATE_PER_MILLION_INR` | `4` | LLM input token rate |

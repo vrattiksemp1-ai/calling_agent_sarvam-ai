@@ -407,14 +407,20 @@ class CallSession:
     def _persist_timings(self, timings: TurnTimings) -> None:
         if not timings.session_id:
             return
-        with session_scope(self._factory) as db:
-            persist_turn_telemetry(db, timings.session_id, timings)
-            if timings.assistant_message_id is not None:
-                message = db.get(Message, timings.assistant_message_id)
-                caller_latency = timings.caller_perceived()
-                if message is not None and caller_latency is not None:
-                    message.total_turn_latency_ms = caller_latency
-                    db.add(message)
+        try:
+            with session_scope(self._factory) as db:
+                persist_turn_telemetry(db, timings.session_id, timings)
+                if timings.assistant_message_id is not None:
+                    message = db.get(Message, timings.assistant_message_id)
+                    caller_latency = timings.caller_perceived()
+                    if message is not None and caller_latency is not None:
+                        message.total_turn_latency_ms = caller_latency
+                        db.add(message)
+        except Exception:
+            logger.warning(
+                "Could not persist turn timings (audio playback continues)",
+                exc_info=True,
+            )
 
     # ---------- turn processing ----------
 

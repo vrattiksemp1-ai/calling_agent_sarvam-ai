@@ -1,10 +1,26 @@
-# Runs ONLY the Sarvam Cloud Lead Agent MVP.
-# All speech/LLM calls go to the Sarvam AI cloud (no local services needed).
+# Runs the Sarvam Cloud Lead Agent MVP with PostgreSQL.
+# All speech/LLM calls go to the Sarvam AI cloud (no local speech services).
 # Set SARVAM_API_KEY in .env (the real .env is never committed).
 #
 # To run:  docker compose up --build
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sarvam-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-sarvam_leads}
+    volumes:
+      - sarvam-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
   sarvam-lead-agent:
     build: .
     container_name: sarvam-lead-agent
@@ -13,12 +29,14 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE_URL=sqlite:////app/data/sarvam_leads.db
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-sarvam_leads}
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
-      - sarvam-data:/app/data
       - sarvam-storage:/app/storage
     restart: unless-stopped
 
 volumes:
-  sarvam-data:
+  sarvam-postgres:
   sarvam-storage:

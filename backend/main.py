@@ -91,7 +91,12 @@ def build_app(
             allow_headers=["*"],
         )
 
-    _, factory = create_engine_and_session(make_database_url(settings))
+    db_url = make_database_url(settings)
+    _, factory = create_engine_and_session(db_url)
+    logger.info(
+        "Database ready (%s)",
+        "postgresql" if "postgresql" in db_url else "sqlite",
+    )
     app.state.settings = settings
     app.state.session_factory = session_factory or factory
     app.state.sarvam_client = sarvam_client or SarvamClient(settings)

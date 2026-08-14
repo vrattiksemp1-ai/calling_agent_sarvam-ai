@@ -896,11 +896,10 @@ class ConversationEngine:
             session.language = prior_language
             parsed.detected_language = prior_language
 
-        # If we hard-pinned gu/hi from Indic script but the model answered in
-        # English, that often means phone ASR wrote English phonetics in
-        # Gujarati/Hindi letters. Trust an explicit English detection from the
-        # model (real switch). Otherwise use a local fallback; never make a
-        # second LLM call.
+        # If we hard-pinned gu/hi but the model answered in another script:
+        # never make a second LLM call. Keep a real Indic reply (Gujarati vs
+        # Hindi) so we do not replace "yes I can speak Hindi" with "please
+        # repeat". Only Latin/English-looking replies use the local fallback.
         if turn_language in {"gu", "hi"} and self._reply_language_mismatch(
             parsed.assistant_message or "", turn_language
         ):
@@ -912,6 +911,15 @@ class ConversationEngine:
                 session.language = "en"
                 parsed.detected_language = "en"
                 timings.language_repair = "model_language_switch"
+            elif reply_script in {"gu", "hi"}:
+                logger.info(
+                    "LLM replied in %s while pin=%s; keeping reply for TTS",
+                    reply_script,
+                    turn_language,
+                )
+                parsed.detected_language = reply_script
+                session.language = turn_language
+                timings.language_repair = "keep_reply_script"
             else:
                 logger.warning(
                     "LLM reply language mismatched pin=%s; using fast fallback",

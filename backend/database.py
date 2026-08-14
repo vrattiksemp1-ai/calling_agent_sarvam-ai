@@ -1,44 +1,72 @@
 """Database engine, session factory and lifecycle helpers.
 
-The SQLite file lives inside this project's data/ directory and is never
-shared with the other MVP project.
+Production uses PostgreSQL. SQLite remains available for unit tests only.
 """
+
+from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session as OrmSession
 from sqlalchemy.orm import sessionmaker
 
-from backend.config import Settings, get_settings
+from backend.config import Settings
 from backend.models import Base
 
 
+def is_sqlite_url(url: str) -> bool:
+    return (url or "").startswith("sqlite")
+
+
+def is_postgres_url(url: str) -> bool:
+    raw = (url or "").lower()
+    return raw.startswith("postgres://") or raw.startswith("postgresql")
+
+
 def make_database_url(settings: Settings) -> str:
-    """Resolve a relative sqlite:/// path against the project root."""
-    url = settings.database_url
+    """Normalize DATABASE_URL for SQLAlchemy (psycopg2 / relative SQLite)."""
+    url = (settings.database_url or "").strip()
+    if url.startswith("postgres://"):
+        url = "postgresql+psycopg2://" + url[len("postgres://") :]
+    elif url.startswith("postgresql://"):
+        url = "postgresql+psycopg2://" + url[len("postgresql://") :]
     if url.startswith("sqlite:///"):
         raw = url[len("sqlite:///") :]
         path = Path(raw)
         if not path.is_absolute():
-            path = Path(settings.__class__.PROJECT_ROOT if hasattr(settings.__class__, "PROJECT_ROOT") else Path(__file__).resolve().parent.parent) / path
+            root = Path(__file__).resolve().parent.parent
+            path = root / path
         path.parent.mkdir(parents=True, exist_ok=True)
         return f"sqlite:///{path.as_posix()}"
     return url
 
 
-def create_engine_and_session(url: str) -> tuple[object, sessionmaker]:
+def create_engine_and_session(url: str) -> tuple[Engine, sessionmaker]:
     connect_args: dict = {}
-    # check_same_thread is SQLite-only; PostgreSQL drivers reject it.
-    if url.startswith("sqlite:///"):
+    kwargs: dict = {"pool_pre_ping": True}
+    if is_sqlite_url(url):
         connect_args["check_same_thread"] = False
-    engine = create_engine(
-        url,
-        connect_args=connect_args,
-        pool_pre_ping=True,
-    )
+        connect_args["timeout"] = 15.0
+        kwargs["connect_args"] = connect_args
+    else:
+        kwargs["pool_size"] = 10
+        kwargs["max_overflow"] = 20
+        kwargs["pool_recycle"] = 1800
+
+    engine = create_engine(url, **kwargs)
+    if is_sqlite_url(url):
+
+        @event.listens_for(engine, "connect")
+        def _sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=15000")
+            cursor.close()
+
     Base.metadata.create_all(engine)
     session_factory = sessionmaker(bind=engine, expire_on_commit=False)
     return engine, session_factory

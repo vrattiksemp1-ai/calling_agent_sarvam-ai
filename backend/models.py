@@ -1,6 +1,6 @@
 """SQLAlchemy ORM models for the Sarvam Cloud Lead Agent.
 
-Every table is specific to this project and stored in its own SQLite file.
+Every table is specific to this project. Production stores them in PostgreSQL.
 """
 
 import uuid

@@ -55,7 +55,9 @@ class Settings(BaseSettings):
     app_port: int = 8021
     debug: bool = False
 
-    database_url: str = "sqlite:///./data/sarvam_leads.db"
+    database_url: str = (
+        "postgresql+psycopg2://postgres:postgres@localhost:5432/sarvam_leads"
+    )
 
     sarvam_base_url: str = "https://api.sarvam.ai"
     sarvam_api_key: str = ""

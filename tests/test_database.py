@@ -2,7 +2,7 @@
 
 import pytest
 
-from backend.database import create_engine_and_session
+from backend.database import create_engine_and_session, make_database_url
 from backend.models import (
     LEAD_FIELDS,
     Lead,
@@ -11,6 +11,7 @@ from backend.models import (
     ProviderEvent,
     Session,
 )
+from tests.conftest import make_settings
 
 
 @pytest.fixture
@@ -18,6 +19,23 @@ def factory(tmp_path):
     url = f"sqlite:///{str(tmp_path / 'db.db').replace(chr(92), '/')}"
     _, factory = create_engine_and_session(url)
     return factory
+
+
+def test_make_database_url_uses_psycopg2_driver(tmp_path):
+    settings = make_settings(
+        tmp_path,
+        database_url="postgresql://user:pass@db:5432/sarvam_leads",
+    )
+    assert make_database_url(settings).startswith("postgresql+psycopg2://")
+
+
+def test_make_database_url_accepts_postgres_scheme(tmp_path):
+    settings = make_settings(
+        tmp_path, database_url="postgres://user:pass@db:5432/leads"
+    )
+    assert make_database_url(settings) == (
+        "postgresql+psycopg2://user:pass@db:5432/leads"
+    )
 
 
 def test_lead_fields_list_is_complete():
@@ -92,6 +110,19 @@ def test_delete_session_cascades(factory):
         assert db.get(Session, sid) is None
         assert db.query(Message).filter(Message.session_id == sid).count() == 0
         assert db.query(Lead).filter(Lead.session_id == sid).count() == 0
+
+
+def test_sqlite_uses_wal_and_busy_timeout(tmp_path):
+    url = f"sqlite:///{str(tmp_path / 'wal.db').replace(chr(92), '/')}"
+    engine, factory = create_engine_and_session(url)
+    with engine.connect() as conn:
+        mode = conn.exec_driver_sql("PRAGMA journal_mode").scalar()
+        timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar()
+    assert str(mode).lower() == "wal"
+    assert int(timeout) >= 15000
+    with factory() as db:
+        db.add(Session(language="en"))
+        db.commit()
 
 
 def test_lead_defaults(factory):
