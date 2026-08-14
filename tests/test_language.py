@@ -136,6 +136,7 @@ def test_system_prompt_has_human_language_and_hangup_rules():
     assert "acknowledge" in prompt
     assert "NEVER ask a question and then disconnect in the same turn" in prompt
     assert "Write for the VOICE engine" in prompt
+    assert "VOICE PERSONA" in prompt
     assert "opening/greeting" in prompt
     assert "do NOT introduce" in prompt
 

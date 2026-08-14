@@ -44,6 +44,7 @@ def test_compact_phone_prompt_is_shorter_than_full():
     )
     assert len(compact) < len(full)
     assert "Shivangi" in compact
+    assert "VOICE PERSONA" in compact
     assert "Field meanings:" not in compact
     assert "CALL PROFILE facts" in compact
 
@@ -60,8 +61,8 @@ def test_compact_messages_skip_glossary_and_trim_history():
     )
     system = messages[0]["content"]
     assert "Field meanings:" not in system
-    # system + last 6 history + state user = 8
-    assert len(messages) == 8
+    # system + last 10 history (compact default) + state user = 12
+    assert len(messages) == 12
 
 
 def test_turn_flow_gather_attrs_use_settings(tmp_path):

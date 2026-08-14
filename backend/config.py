@@ -79,6 +79,9 @@ class Settings(BaseSettings):
     sarvam_realtime_stt_fallback_enabled: bool = True
     sarvam_tts_model: str = "bulbul:v3"
     sarvam_tts_speaker: str = "ritu"
+    # Optional explicit gender for the TTS speaker: female | male.
+    # Empty = infer from the speaker catalog (ritu → female, shubh → male).
+    sarvam_tts_speaker_gender: str = ""
     sarvam_tts_language_code: str = "gu-IN"
     # Bulbul v3 expressiveness/speed. Sarvam recommends ~0.7-0.8 for warm
     # conversational agents; 1.0 is natural pace.
@@ -219,6 +222,18 @@ class Settings(BaseSettings):
             return value
         cleaned = value.split("#", 1)[0].strip().strip("\"'")
         return cleaned or "ritu"
+
+    @field_validator("sarvam_tts_speaker_gender", mode="before")
+    @classmethod
+    def _clean_tts_gender(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        cleaned = value.split("#", 1)[0].strip().strip("\"'").lower()
+        if cleaned in {"male", "man", "m", "masculine"}:
+            return "male"
+        if cleaned in {"female", "woman", "f", "w", "feminine"}:
+            return "female"
+        return ""
 
     @field_validator("telephony_provider")
     @classmethod

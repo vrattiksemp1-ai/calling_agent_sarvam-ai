@@ -39,6 +39,7 @@ from backend.providers.llm_client import LlmClient
 from backend.schemas import LeadOut
 from backend.sentiment import rolling_transcript_style
 from backend.streaming_json import AssistantMessageStreamParser
+from backend.tts_persona import resolve_tts_gender
 from backend.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -482,6 +483,12 @@ class ConversationEngine:
         self._agent_name = profile.agent_name
 
     def _prompt_kwargs(self, *, compact: bool = False) -> dict:
+        speaker = "ritu"
+        gender_override = ""
+        if self._settings is not None:
+            speaker = (self._settings.sarvam_tts_speaker or "ritu").strip() or "ritu"
+            gender_override = self._settings.sarvam_tts_speaker_gender or ""
+
         return {
             "business_name": self._business_name,
             "business_description": self._business_description,
@@ -489,6 +496,8 @@ class ConversationEngine:
             "disclose_ai_assistant": self._disclose_ai_assistant,
             "call_profile": self._call_profile,
             "compact": compact,
+            "tts_speaker": speaker,
+            "tts_gender": resolve_tts_gender(speaker, gender_override),
         }
 
     @staticmethod

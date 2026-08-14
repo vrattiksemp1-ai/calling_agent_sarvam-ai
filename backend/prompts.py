@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from backend.models import LEAD_FIELDS
 from backend.sentiment import TranscriptStyleSignal, style_prompt_block
+from backend.tts_persona import resolve_tts_gender, voice_persona_prompt_block
 
 if TYPE_CHECKING:
     from backend.call_profile import CallProfile
@@ -155,9 +156,7 @@ Rules:
     they have time / a couple of minutes. Move forward.
   - After a language switch, CONTINUE the same conversation — do not restart
     with a fresh intro or time check in the new language.
-  - You are a woman named {agent_name}. In Gujarati/Hindi always use feminine
-    verb agreement for yourself (રહી છું / कर रही हूँ). Never masculine
-    forms (રહ્યો / रहा हूँ) about yourself.
+{voice_persona_block}
   - If asked "where are you calling from?" (or Gu/Hi ASR of that), answer in
     FIRST PERSON from {business_name} using CALL PROFILE facts — short and
     natural. Never speak about the caller in third person.
@@ -285,7 +284,7 @@ Memory and continuity:
 - A language switch changes only language, never topic or conversation stage.
 - Scheduling later / busy / video-call later → preferred_contact_time (and notes).
   Do not set email to "{refusal}" unless the caller clearly refused email.
-- You are a woman named {agent_name}. Use feminine agreement for yourself in Gujarati/Hindi.
+{voice_persona_block}
 
 Language: reply entirely in the caller's latest language (en/hi/gu/en-hi). detected_language
 must match assistant_message. Obey "speak English" / સ્પીકિંગ ઇંગલિશ immediately.
@@ -357,6 +356,8 @@ def build_system_prompt(
     disclose_ai_assistant: bool = True,
     call_profile: "CallProfile | None" = None,
     compact: bool = False,
+    tts_speaker: str | None = None,
+    tts_gender: str | None = None,
 ) -> str:
     fields_csv = ", ".join(LEAD_FIELDS)
     states_csv = _allowed_states_csv()
@@ -376,6 +377,14 @@ def build_system_prompt(
         or business_description
         or "a technology company"
     )
+    resolved_speaker = (tts_speaker or "ritu").strip() or "ritu"
+    resolved_gender = resolve_tts_gender(resolved_speaker, tts_gender)
+    voice_persona_block = voice_persona_prompt_block(
+        resolved_agent,
+        resolved_speaker,
+        resolved_gender,
+        compact=compact,
+    )
 
     if compact:
         prompt = PHONE_SYSTEM_PROMPT_COMPACT.format(
@@ -384,6 +393,7 @@ def build_system_prompt(
             refusal=REFUSAL_TOKEN,
             agent_name=resolved_agent,
             business_name=resolved_business,
+            voice_persona_block=voice_persona_block,
         )
         if disclose_ai_assistant:
             prompt += (
@@ -400,6 +410,7 @@ def build_system_prompt(
         refusal=REFUSAL_TOKEN,
         agent_name=resolved_agent,
         business_name=resolved_business,
+        voice_persona_block=voice_persona_block,
     )
     if resolved_business and resolved_description:
         ai_disclosure = (
@@ -457,6 +468,8 @@ def build_messages(
     compact: bool = False,
     history_limit: int | None = None,
     progress_hints: str | None = None,
+    tts_speaker: str | None = None,
+    tts_gender: str | None = None,
 ) -> list[dict]:
     state_block = (
         "\n\nCurrent state: "
@@ -490,6 +503,8 @@ def build_messages(
         disclose_ai_assistant=disclose_ai_assistant,
         call_profile=call_profile,
         compact=compact,
+        tts_speaker=tts_speaker,
+        tts_gender=tts_gender,
     )
     # Style block is skipped in compact phone mode to keep TTFT low.
     if style_signal is not None and not compact:
