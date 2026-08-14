@@ -33,7 +33,11 @@ from backend.errors import AppError
 from backend.metrics import TurnTimings, persist_turn_telemetry
 from backend.call_profile import build_call_profile
 from backend.models import Lead, Message, Session
-from backend.language_utils import infer_script_language
+from backend.language_utils import (
+    detect_explicit_language_switch,
+    infer_script_language,
+    resolve_turn_language,
+)
 from backend.pipeline_trace import trace
 from backend.providers.sarvam_client import SarvamClient
 from backend.streaming_json import FirstSpeechChunkBuffer
@@ -939,6 +943,7 @@ class TurnFlow:
 
         reply = ""
         detected_language = self._settings.default_language
+        listen_language = self._settings.default_language
         completed = False
         abandoned = False
         reply_url: str | None = None
@@ -968,10 +973,20 @@ class TurnFlow:
             timings.transcript_char_count = len(text)
             timings.mark("transcript_received")
             first_chunk = FirstSpeechChunkBuffer()
+            prior_lang = (session.language or "").strip().lower()
+            expected_lang = resolve_turn_language(
+                text, prior_language=prior_lang
+            )
+            switching = bool(detect_explicit_language_switch(text)) or bool(
+                expected_lang
+                and prior_lang
+                and expected_lang != prior_lang
+            )
             use_speak_early = bool(
                 pending is not None
                 and self._settings.llm_streaming_enabled
                 and self._settings.sarvam_tts_streaming
+                and not switching
             )
 
             async def speak_early(fragment: str) -> None:
@@ -1030,10 +1045,19 @@ class TurnFlow:
                         "playing the validated reply in full."
                     )
             timings.response_char_count = len(reply)
-            if getattr(parsed, "detected_language", None):
-                detected_language = parsed.detected_language
+            listen_language = (
+                session.language
+                or getattr(parsed, "detected_language", None)
+                or detected_language
+            )
+            tts_language = (
+                infer_script_language(reply)
+                or getattr(parsed, "detected_language", None)
+                or listen_language
+            )
+            detected_language = tts_language
             if pending is not None:
-                pending.language = detected_language
+                pending.language = listen_language
             completed = session.status == "completed"
             abandoned = session.status == "abandoned"
             trace(
@@ -1042,7 +1066,7 @@ class TurnFlow:
                 turn_id=timings.turn_id,
                 session_id=session.id,
                 state=session.current_state,
-                language=detected_language,
+                language=listen_language,
                 reply=reply,
                 llm_latency_ms=timings.llm_latency_ms,
                 completed=completed,
@@ -1131,5 +1155,5 @@ class TurnFlow:
         return self._gather_twiml(
             reply_url,
             remaining_reply if reply_url is None else None,
-            language=detected_language,
+            language=listen_language,
         )

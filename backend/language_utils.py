@@ -138,7 +138,11 @@ def detect_explicit_language_switch(text: str | None) -> str | None:
         "हिन्दी",
         "હિન્દી",
         "સ્પીક હિન્દી",
+        "સ્પીકિંગ હિન્દી",
         "હિન્દીમાં",
+        "હિન્દી મેં",
+        "હિન્દીમાં વાત",
+        "बात कर सकते",
     )
     gu_patterns = (
         "gujarati mein",
@@ -243,13 +247,19 @@ def resolve_turn_language(
     explicit = detect_explicit_language_switch(user_text)
     if explicit:
         return explicit
-    if stt_language in {"en", "hi", "gu"}:
-        return stt_language
     if looks_like_latin_english_sentence(user_text):
         return "en"
     script = infer_script_language(user_text)
+    prior = (prior_language or "").strip().lower() or None
+    # After a Hindi pin, Twilio Gather often still writes Hindi as Gujarati
+    # letters. Do not flip back to Gujarati unless they asked for Gujarati.
+    if prior == "hi" and script == "gu":
+        return "hi"
+    if stt_language in {"en", "hi", "gu"}:
+        if not (prior == "hi" and stt_language == "gu"):
+            return stt_language
     if script:
         return script
     if should_keep_prior_language(user_text, prior_language):
-        return (prior_language or "").strip().lower() or None
+        return prior
     return None

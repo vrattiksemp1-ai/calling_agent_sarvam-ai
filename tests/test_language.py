@@ -122,7 +122,7 @@ def test_system_prompt_has_human_language_and_hangup_rules():
     assert "ENDING THE CALL" in prompt
     assert "Keep the caller ENGAGED" in prompt
     assert "Stay in ONE language for the whole turn" in prompt
-    assert "Follow the caller's LATEST message language" in prompt
+    assert "Follow the language they REQUEST" in prompt
     assert "Explicit switch phrases must be obeyed immediately" in prompt
     assert "Never ask again for a field" in prompt
     assert "abandoned" in prompt
@@ -181,6 +181,22 @@ def test_script_language_inference_no_word_lists():
         == "en"
     )
     assert lu.detect_explicit_language_switch("can we speak in english") == "en"
+    assert lu.detect_explicit_language_switch("કેન યુ સ્પીકિંગ હિન્દી") == "hi"
+    assert lu.detect_explicit_language_switch("કેમ હિન્દી મેં બાત કર સકતે") == "hi"
+    assert (
+        lu.resolve_turn_language(
+            "કેન યુ સ્પીકિંગ હિન્દી",
+            prior_language="gu",
+        )
+        == "hi"
+    )
+    assert (
+        lu.resolve_turn_language(
+            "હું વ્યવસાય નથી કરતો આઈ એમ સ્ટુડન્ટ",
+            prior_language="hi",
+        )
+        == "hi"
+    )
 
 
 @pytest.mark.asyncio
@@ -372,13 +388,15 @@ async def test_hindi_switch_wrong_script_does_not_retry_llm(tmp_path):
         session = db.get(Session, session_id)
         _, parsed = await engine.process_turn(db, session, "હિન્દી", timings)
         db.commit()
-        assert parsed.assistant_message.startswith("ટેકનો")
-        assert parsed.detected_language == "gu"
+        from backend.language_utils import infer_script_language
+
+        assert infer_script_language(parsed.assistant_message) == "hi"
+        assert parsed.detected_language == "hi"
         assert session.language == "hi"
         assert calls == 1
         assert timings.llm_attempt_count == 1
-        assert timings.language_repair == "keep_reply_script"
-        assert timings.fallback_count == 0
+        assert timings.language_repair == "language_switch_fallback"
+        assert timings.fallback_count == 1
 
 
 @pytest.mark.asyncio

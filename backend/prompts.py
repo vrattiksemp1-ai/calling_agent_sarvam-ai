@@ -168,13 +168,18 @@ Rules:
 - LANGUAGE - VERY IMPORTANT:
   - Stay in ONE language for the whole turn. Never say the same thing twice in
     two languages.
-  - Follow the caller's LATEST message language. If they switch, you switch in
-    the SAME turn.
+  - Follow the language they REQUEST, otherwise the latest message language.
+    If they switch, switch in the SAME turn. A Hindi or English request written
+    in Gujarati letters is still Hindi or English — do not copy the ASR script.
   - Set "detected_language" to the language of that latest message and write
     your entire "assistant_message" in that same language.
   - Reply in the SAME language the user speaks or requests. Support English,
     Hindi, Hinglish, Gujarati, and Gujlish.
-  - Explicit switch phrases must be obeyed immediately.
+  - Explicit switch phrases must be obeyed immediately, even when phone ASR
+    writes "speak Hindi" in Gujarati letters (કેન યુ સ્પીકિંગ હિન્દી).
+  - If they asked for Hindi: entire assistant_message in Devanagari
+    (जी बिल्कुल, हिंदी में बात करते हैं). Never Gujarati letters on a Hindi turn.
+  - If they asked for Gujarati: Gujarati script only. If English: English only.
   - A full clear Latin-script English sentence is a switch to English. Short
     English words inside Gujarati/Hindi ("okay", "CRM", "theek") are NOT a
     switch.
@@ -287,7 +292,10 @@ Memory and continuity:
 {voice_persona_block}
 
 Language: reply entirely in the caller's latest language (en/hi/gu/en-hi). detected_language
-must match assistant_message. Obey "speak English" / સ્પીકિંગ ઇંગલિશ immediately.
+must match assistant_message. Obey "speak English" / "speak Hindi" / સ્પીકિંગ ઇંગલિશ /
+સ્પીકિંગ હિન્દી / हिंदी में immediately, even if ASR wrote that request in Gujarati letters.
+If they asked for Hindi, write Devanagari only (जी, हाँ, मैं) — never Gujarati script.
+If they asked for Gujarati, write Gujarati script only. If they asked for English, write English.
 Your name is {agent_name} from {business_name}.
 When speaking Gujarati, spell names EXACTLY as in CALL PROFILE (શિવાંગી / વ્રત્તિક્સ). Never write શિવંગી or વ્રટિક્સ. Hindi: शिवांगी / व्रत्तिक्स.
 Memory: never re-ask collected fields. Put new values in extracted_fields same turn.
@@ -511,7 +519,20 @@ def build_messages(
         system += style_prompt_block(style_signal)
     if language:
         name = LANGUAGE_NAMES.get((language or "").strip().lower(), language)
-        system += f"\n\nThe caller speaks {name}. Reply entirely in {name}."
+        lock = ""
+        key = (language or "").strip().lower()
+        if key == "hi":
+            lock = (
+                " Write the entire assistant_message in Devanagari Hindi "
+                "(जी, हाँ, मैं, बात). Never Gujarati letters. A Hindi request "
+                "transcribed in Gujarati script is still a Hindi turn."
+            )
+        elif key == "gu":
+            lock = (
+                " Write the entire assistant_message in Gujarati script. "
+                "Do not switch to Hindi unless they asked."
+            )
+        system += f"\n\nThe caller speaks {name}. Reply entirely in {name}.{lock}"
     if include_field_glossary and not compact:
         glossary = "\nField meanings:\n" + "\n".join(
             f"- {k}: {v}" for k, v in FIELD_GLOSSARY.items()

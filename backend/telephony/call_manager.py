@@ -68,7 +68,21 @@ FALLBACK_MESSAGES = {'repeat': {'en': ["Sorry, I didn't catch that. Could you sa
                     'ટાઈમ આપ્યો એટલે આભાર. અમે આગળ વધીશું. આવજો!']},
  'hold': {'en': ['One moment.', 'Just a second.', 'Hang on a moment.'],
           'hi': ['एक सेकंड।', 'ज़रा रुकिए।', 'एक पल।'],
-          'gu': ['એક સેકન્ડ.', 'જરા રોકો.', 'એક પળ.']}}
+          'gu': ['એક સેકન્ડ.', 'જરા રોકો.', 'એક પળ.']},
+ 'language_switch': {
+     'en': [
+         'Sure, we can continue in English. Please go on.',
+         'Of course, English is fine. What were you saying?',
+     ],
+     'hi': [
+         'जी बिल्कुल, हिंदी में बात करते हैं। आगे बताइए।',
+         'हाँ, अब हिंदी में बात करते हैं।',
+     ],
+     'gu': [
+         'હા, ગુજરાતીમાં વાત કરીએ. આગળ કહો.',
+         'બિલકુલ, હવે ગુજરાતીમાં વાત કરીએ.',
+     ],
+ }}
 
 
 
