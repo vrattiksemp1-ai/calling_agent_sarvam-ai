@@ -247,19 +247,18 @@ class TwilioService:
         return numbers
 
     async def verified_numbers(self) -> list[str]:
-        """Numbers verified in the Twilio Console, plus the env fallback list."""
+        """Verified Caller IDs from Twilio Console, merged with the env list.
+
+        Trial outbound ``To`` numbers are Twilio Verified Caller IDs
+        (OutgoingCallerIds). Env values remain a fallback when that API
+        returns 401, and extras that are verified only in .env.
+        """
         if self._verified_cache is not None:
             fetched_at, cached = self._verified_cache
             if time.monotonic() - fetched_at < VERIFIED_NUMBERS_CACHE_SECONDS:
                 return list(cached)
 
         numbers = self._configured_verified_numbers()
-        # When .env already lists verified destinations, skip OutgoingCallerIds.
-        # Some trial/API keys return 401 for that endpoint even though Calls work.
-        if numbers:
-            self._verified_cache = (time.monotonic(), list(numbers))
-            return list(numbers)
-
         if self.configured and not getattr(self, "_verified_api_disabled", False):
             try:
                 await asyncio.to_thread(self._fetch_verified_numbers, numbers)

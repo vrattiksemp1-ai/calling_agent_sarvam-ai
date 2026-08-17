@@ -209,6 +209,31 @@ async def test_twilio_service_verified_numbers(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_twilio_service_merges_env_and_console_verified_ids(tmp_path):
+    """Console-verified To numbers still appear when .env already lists one."""
+    settings = make_settings(
+        tmp_path,
+        twilio_account_sid="AC123",
+        twilio_auth_token="tok",
+        twilio_phone_number="+15005550006",
+        public_base_url="https://x.ngrok-free.app",
+        twilio_test_phone_number="+919876543210",
+        twilio_verified_numbers="+919111111111,+919222222222",
+    )
+    service = make_mock_twilio_client(settings)
+    service._client.outgoing_caller_ids.numbers = [
+        "+917048211715",
+        "+919333333333",
+    ]
+    numbers = await service.verified_numbers()
+    assert "+919876543210" in numbers
+    assert "+919111111111" in numbers
+    assert "+919222222222" in numbers
+    assert "+917048211715" in numbers
+    assert "+919333333333" in numbers
+
+
+@pytest.mark.asyncio
 async def test_twilio_service_complete_call(tmp_path):
     settings = _service_settings(tmp_path)
     service = make_mock_twilio_client(settings)

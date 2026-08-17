@@ -100,10 +100,9 @@ def _call_service(request: Request, provider: str):
 async def list_verified_numbers(request: Request) -> dict:
     """Destination numbers the caller may choose from (dropdown source).
 
-    Always returns ``TWILIO_VERIFIED_NUMBERS`` / ``TWILIO_TEST_PHONE_NUMBER``
-    from settings (plus Twilio Console verified IDs when reachable). The
-    frontend uses this list for the picker whether or not Gather trial mode
-    is enabled; free-form entry is only used when the list is empty.
+    Merges Twilio Console Verified Caller IDs (OutgoingCallerIds API) with
+    ``TWILIO_VERIFIED_NUMBERS`` / ``TWILIO_TEST_PHONE_NUMBER``. The frontend
+    uses this list for the picker; free-form entry is only used when empty.
     """
     twilio = _twilio(request)
     numbers = await twilio.verified_numbers()
