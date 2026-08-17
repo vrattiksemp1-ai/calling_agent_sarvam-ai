@@ -45,8 +45,12 @@ def test_compact_phone_prompt_is_shorter_than_full():
     assert len(compact) < len(full)
     assert "Shivangi" in compact
     assert "VOICE PERSONA" in compact
+    assert "Spoken delivery" in compact
+    assert "TONE AND EMOTION" not in compact
     assert "Field meanings:" not in compact
     assert "CALL PROFILE facts" in compact
+    # Compact stays far smaller than the full prompt so Gather TTFT does not jump.
+    assert len(compact) < len(full) * 0.75
 
 
 def test_compact_messages_skip_glossary_and_trim_history():
