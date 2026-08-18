@@ -135,8 +135,9 @@ class Settings(BaseSettings):
     phone_prompt_compact: bool = True
 
     # Twilio Gather (trial) latency knobs — do not expect Media-Streams 2–3s here.
-    # Wait longer inline before Pause/Redirect so more turns return Play+Gather.
-    gather_inline_budget_seconds: float = 5.0
+    # How long /turn waits for Play/speak-early before Redirect. Capped at 3s
+    # in turn_flow so we stay under Twilio's ~5s TwiML fetch timeout.
+    gather_inline_budget_seconds: float = 3.0
     # Silent hold before Redirect. 0 = Redirect immediately (saves ~1s).
     gather_poll_pause_seconds: int = 0
     # Twilio speechTimeout: seconds of silence after speech, or "auto".

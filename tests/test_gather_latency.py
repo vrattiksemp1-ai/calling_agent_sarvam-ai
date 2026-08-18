@@ -23,8 +23,26 @@ from tests.conftest import make_mock_llm_client, make_settings, structured_json
 
 
 def test_gather_defaults_favor_lower_hold():
-    assert TURN_INLINE_BUDGET_SECONDS >= 5.0
+    assert 0 < TURN_INLINE_BUDGET_SECONDS <= 3.5
     assert TURN_POLL_PAUSE_SECONDS == 0
+
+
+def test_webhook_hold_stays_under_twilio_fetch_timeout(tmp_path):
+    """A 5s env budget must not hold the webhook until Twilio's ~5s fetch cap."""
+    from backend.telephony.turn_flow import TWIML_FETCH_SAFE_SECONDS
+
+    settings = make_settings(tmp_path, gather_inline_budget_seconds=5.0)
+    flow = TurnFlow(
+        settings=settings,
+        session_factory=MagicMock(),
+        engine=MagicMock(),
+        sarvam=MagicMock(),
+        twilio=MagicMock(),
+        registry=CallRegistry(),
+    )
+    hold = flow._twiml_hold_seconds()
+    assert hold <= TWIML_FETCH_SAFE_SECONDS
+    assert hold < 5.0
 
 
 def test_compact_phone_prompt_is_shorter_than_full():

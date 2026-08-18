@@ -60,14 +60,15 @@ HOSTED_FILE_TTL_SECONDS = 2 * 3600
 TTS_FIRST_CHUNK_TIMEOUT_SECONDS = 2.0
 TTS_STREAM_TTL_SECONDS = 120
 
-# Twilio call-processing webhooks hard-cap at ~15s. Heavy LLM+TTS work must
-# NOT run inside that request - we return a short hold + Redirect to
-# /turn-result and finish there so Twilio never plays "could not reach TwiML".
-# Defaults favor Gather latency; Settings can override per deployment.
-TURN_INLINE_BUDGET_SECONDS = 5.0
-TURN_POLL_WAIT_SECONDS = 12.0
+# Twilio trial TwiML fetch timeout is ~5s (paid accounts ~15s). Holding
+# /turn or /turn-result until that limit makes Twilio play "we did not reach
+# your TwiML". Background LLM+TTS continues; we Redirect sooner.
+# Settings can request a longer inline wait, but webhook holds are capped.
+TURN_INLINE_BUDGET_SECONDS = 3.0
+TURN_POLL_WAIT_SECONDS = 3.0
+TWIML_FETCH_SAFE_SECONDS = 3.0
 TURN_POLL_PAUSE_SECONDS = 0
-MAX_TURN_POLLS = 6
+MAX_TURN_POLLS = 8
 PENDING_TURN_TTL_SECONDS = 180
 
 # default_language -> <Gather language> attribute for Twilio Speech Recognition
@@ -166,6 +167,17 @@ class TurnFlow:
         if TURN_INLINE_BUDGET_SECONDS < 1.0:
             return float(TURN_INLINE_BUDGET_SECONDS)
         return configured
+
+    def _twiml_hold_seconds(self) -> float:
+        """How long this webhook may block before Redirecting.
+
+        Always stay under Twilio's TwiML fetch timeout so a stuck LLM stream
+        cannot trigger the 'could not reach TwiML' prompt.
+        """
+        hold = min(self._inline_budget_seconds(), float(TWIML_FETCH_SAFE_SECONDS))
+        if TURN_POLL_WAIT_SECONDS < 1.0:
+            return float(TURN_POLL_WAIT_SECONDS)
+        return max(0.05, hold)
 
     def _poll_pause_seconds(self) -> int:
         try:
@@ -772,15 +784,15 @@ class TurnFlow:
             language=pending.language,
             transcript=text,
             transcript_chars=len(text),
-            inline_budget_s=self._inline_budget_seconds(),
+            inline_budget_s=self._twiml_hold_seconds(),
         )
         self._pending_turns[call_sid] = pending
         pending.task = asyncio.create_task(
             self._run_turn_job(pending, text), name=f"turn-{call_sid[-8:]}"
         )
-        # Keep the Twilio webhook tiny. If the reply is ready almost immediately
-        # we return it inline; otherwise Redirect before Twilio's ~15s cap.
-        inline_budget = self._inline_budget_seconds()
+        # Keep the Twilio webhook tiny. If early audio or the full reply is
+        # ready we return it; otherwise Redirect before Twilio's fetch timeout.
+        inline_budget = self._twiml_hold_seconds()
         progress = await self._wait_for_pending_progress(pending, inline_budget)
         if progress == "timeout":
             content = self._pending_redirect_twiml(pending)
@@ -874,7 +886,7 @@ class TurnFlow:
             pending.done.is_set(),
         )
         progress = await self._wait_for_pending_progress(
-            pending, TURN_POLL_WAIT_SECONDS
+            pending, self._twiml_hold_seconds()
         )
         if progress == "timeout":
             if pending.timings is not None:
