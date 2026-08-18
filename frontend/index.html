@@ -36,6 +36,33 @@
         <span id="call-status" class="call-status" role="status"></span>
       </div>
 
+      <fieldset id="call-lead-fields" class="call-lead-fields">
+        <legend>Optional lead details for this call</legend>
+        <div class="call-lead-grid">
+          <label>Full name
+            <input id="lead-full-name" type="text" autocomplete="name" placeholder="e.g. Kamya" />
+          </label>
+          <label>Company name
+            <input id="lead-company-name" type="text" autocomplete="organization" placeholder="e.g. Vrattiks" />
+          </label>
+          <label>Job title
+            <input id="lead-job-title" type="text" autocomplete="organization-title" placeholder="e.g. Full stack developer" />
+          </label>
+          <label>City
+            <input id="lead-city" type="text" autocomplete="address-level2" placeholder="e.g. Surat" />
+          </label>
+          <label>Business type
+            <input id="lead-business-type" type="text" placeholder="e.g. Full time developer" />
+          </label>
+          <label>Field notes
+            <input id="lead-field-note" type="text" placeholder="e.g. Expert in full stack" />
+          </label>
+          <label class="span-2">Additional notes
+            <textarea id="lead-additional-notes" rows="2" placeholder="Anything else the agent should know"></textarea>
+          </label>
+        </div>
+      </fieldset>
+
       <div class="status-row">
         <span id="rec-indicator" class="indicator hidden" role="status">REC</span>
         <span id="processing-indicator" class="indicator hidden" role="status">Processing…</span>

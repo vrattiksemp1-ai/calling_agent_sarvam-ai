@@ -469,6 +469,39 @@ def test_place_call_and_status(client):
     assert hang.json()["status"] == "completed"
 
 
+def test_place_call_applies_optional_lead_overrides(client):
+    resp = client.post(
+        "/api/calls",
+        json={
+            "to": "+919876543210",
+            "lead": {
+                "full_name": "Kamya",
+                "company_name": "Vrattiks",
+                "job_title": "Full stack developer",
+                "city": "Surat",
+                "business_type": "Full time developer",
+                "field_note": "Expert in full stack",
+                "additional_notes": "",
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    record = client.app.state.call_registry.get("CA-test-call-sid")
+    assert record is not None
+    assert record.lead_overrides == {
+        "full_name": "Kamya",
+        "company_name": "Vrattiks",
+        "job_title": "Full stack developer",
+        "city": "Surat",
+        "business_type": "Full time developer",
+        "field_note": "Expert in full stack",
+    }
+    profile = client.app.state.conversation_engine.call_profile
+    assert profile.lead.full_name == "Kamya"
+    assert profile.lead.company_name == "Vrattiks"
+    assert profile.lead.city == "Surat"
+
+
 def test_place_call_not_configured(tmp_path):
     settings = make_settings(tmp_path)
     from backend.providers.llm_client import LlmClient

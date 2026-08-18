@@ -34,6 +34,7 @@ const els = {
   callBtn: $("call-btn"),
   hangupBtn: $("hangup-btn"),
   callStatus: $("call-status"),
+  callLeadFields: $("call-lead-fields"),
 };
 
 const ACTIVE_CALL_STATUSES = new Set(["queued", "initiated", "ringing", "answered", "in-progress"]);
@@ -485,6 +486,26 @@ function setCallControls(active) {
   if (els.hangupBtn) els.hangupBtn.disabled = !active;
   if (els.callNumber) els.callNumber.disabled = !!active;
   if (els.callNumberCustom) els.callNumberCustom.disabled = !!active;
+  if (els.callLeadFields) els.callLeadFields.disabled = !!active;
+}
+
+function collectLeadOverrides() {
+  const mapping = [
+    ["lead-full-name", "full_name"],
+    ["lead-company-name", "company_name"],
+    ["lead-job-title", "job_title"],
+    ["lead-city", "city"],
+    ["lead-business-type", "business_type"],
+    ["lead-field-note", "field_note"],
+    ["lead-additional-notes", "additional_notes"],
+  ];
+  const lead = {};
+  mapping.forEach(([id, key]) => {
+    const el = $(id);
+    const value = (el && el.value || "").trim();
+    if (value) lead[key] = value;
+  });
+  return Object.keys(lead).length ? lead : null;
 }
 
 function clearCallPoll() {
@@ -516,10 +537,13 @@ async function placeCall() {
   setCallControls(true);
   els.callStatus.textContent = "Placing call…";
   try {
+    const payload = { to: number };
+    const lead = collectLeadOverrides();
+    if (lead) payload.lead = lead;
     const data = await api("/api/calls", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ to: number }),
+      body: JSON.stringify(payload),
     });
     state.activeCallSid = data.call_sid;
     state.placingCall = false;
