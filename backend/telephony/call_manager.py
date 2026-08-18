@@ -148,6 +148,10 @@ class CallRecord:
     error: str | None = None
     session_id: str | None = None
     lead_overrides: dict | None = None
+    # Per-call opening prepared before dialing when a contact name is supplied.
+    # This must never use the language-only shared greeting cache.
+    greeting_twiml: str | None = None
+    greeting_text: str | None = None
     # Consecutive Twilio Gather empty SpeechResult count (reset on real speech).
     empty_listen_count: int = 0
     created_at: float = field(default_factory=time.time)

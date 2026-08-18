@@ -546,6 +546,13 @@ class TurnFlow:
         new DB session so the first user turn does not re-introduce the agent.
         """
         lang = self._settings.default_language
+        record = self._registry.get(call_sid) if call_sid else None
+        if record and record.greeting_twiml and record.greeting_text:
+            # Named greetings are prepared before dialing and belong only to
+            # this call. Never put them in the language-only shared cache.
+            self._seed_greeting_session(call_sid, record.greeting_text, lang)
+            return record.greeting_twiml
+
         entry = self._greeting_cache.get(lang)
         if entry is not None:
             asyncio.create_task(self._refresh_greeting(lang))
@@ -634,26 +641,46 @@ class TurnFlow:
         finally:
             self._greeting_refreshing.discard(lang)
 
-    async def _build_and_cache_greeting(self, lang: str) -> str:
+    async def prepare_call_greeting(
+        self, language: str | None = None
+    ) -> tuple[str, str]:
+        """Build a greeting for one named call before Twilio starts dialing."""
+        lang = language or self._settings.default_language
+        return await self._build_greeting(lang)
+
+    async def _build_greeting(self, lang: str) -> tuple[str, str]:
+        """Generate and synthesize one opening without caching it."""
         timings = TurnTimings(settings=self._settings)
-        text = fallback_text("greeting", lang, settings=self._settings)
+        profile = self._engine.call_profile
+        text = fallback_text(
+            "greeting",
+            lang,
+            settings=self._settings,
+            call_profile=profile,
+        )
         try:
-            greeting, _, _ = await self._engine.generate_greeting(timings, language=lang)
+            greeting, _, _ = await self._engine.generate_greeting(
+                timings, language=lang
+            )
             if greeting and greeting.strip():
                 text = greeting.strip()
         except AppError:
             logger.warning("Dynamic greeting generation failed; using fallback.")
-        # File-hosted (not streaming) so the audio URL outlives the cache.
+        # File-hosted (not streaming) so the audio URL remains valid through
+        # ringing and Twilio's subsequent <Play> request.
         url, _ = await self._host_tts(text, lang)
-        # If TTS failed, fall back to English <Say> (Twilio cannot speak Gujarati).
         say_fallback = (
             text
             if (url is not None or lang in {"en", "en-in", "en-IN"})
-            else fallback_text("greeting", "en", settings=self._settings)
+            else fallback_text("greeting", "en", call_profile=profile)
         )
         content = self._gather_twiml(
             url, say_fallback if url is None else None, language=lang
         )
+        return content, text
+
+    async def _build_and_cache_greeting(self, lang: str) -> str:
+        content, text = await self._build_greeting(lang)
         self._greeting_cache[lang] = (time.monotonic(), content, text)
         return content
 

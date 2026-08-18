@@ -151,6 +151,19 @@ async def place_call(request: Request, body: PlaceCallRequest) -> CallStatusOut:
     )
     request.app.state.conversation_engine.set_call_profile(profile)
 
+    # A language-only shared greeting cache cannot safely contain a contact
+    # name. Build named audio before dialing, then attach it to the resulting
+    # CallSid so Twilio receives personalized TwiML immediately on answer.
+    prepared_greeting: tuple[str, str] | None = None
+    if (
+        provider == "twilio"
+        and service.trial_mode
+        and (profile.lead.full_name or "").strip()
+    ):
+        prepared_greeting = await turn_flow.prepare_call_greeting(
+            settings.default_language
+        )
+
     trace(
         "call.place.start",
         provider=provider,
@@ -168,6 +181,8 @@ async def place_call(request: Request, body: PlaceCallRequest) -> CallStatusOut:
         provider=provider,
         status=result.status,
         lead_overrides=lead_overrides,
+        greeting_twiml=prepared_greeting[0] if prepared_greeting else None,
+        greeting_text=prepared_greeting[1] if prepared_greeting else None,
     )
     registry.add(record)
     logger.info("Call registered: %s", result.call_sid)

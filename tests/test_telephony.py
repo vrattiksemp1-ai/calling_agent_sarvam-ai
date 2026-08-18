@@ -496,6 +496,30 @@ def test_place_call_applies_optional_lead_overrides(client):
         "business_type": "Full time developer",
         "field_note": "Expert in full stack",
     }
+    assert record.greeting_twiml
+    assert record.greeting_text
+
+    # The answered call must play and persist this call-specific greeting,
+    # rather than whichever Gujarati/English greeting is in the shared cache.
+    twiml = client.post(
+        "/api/calls/twiml", data={"CallSid": record.call_sid}
+    )
+    assert twiml.status_code == 200
+    assert twiml.text == record.greeting_twiml
+
+    from backend.database import session_scope
+    from backend.models import Message
+
+    with session_scope(client.app.state.session_factory) as db:
+        greeting = (
+            db.query(Message)
+            .filter(Message.session_id == record.session_id)
+            .order_by(Message.id)
+            .first()
+        )
+        assert greeting is not None
+        assert greeting.content == record.greeting_text
+
     profile = client.app.state.conversation_engine.call_profile
     assert profile.lead.full_name == "Kamya"
     assert profile.lead.company_name == "Vrattiks"
