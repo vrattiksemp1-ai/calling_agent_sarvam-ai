@@ -12,10 +12,6 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-sarvam_leads}
-    # Publish to the host so a locally-run uvicorn (scripts/run_dev.ps1)
-    # can reach Postgres at localhost:5432.
-    ports:
-      - "5432:5432"
     volumes:
       - sarvam-postgres:/var/lib/postgresql/data
     healthcheck:

@@ -256,12 +256,12 @@ class Settings(BaseSettings):
     business_products: str = ""
     contact_source_channel: str = ""
     contact_source_detail: str = ""
-    default_lead_full_name: str = "kamya"
-    default_lead_company_name: str = "vrattiks"
-    default_lead_job_title: str = "full stack developer"
-    default_lead_city: str = "surat"
-    default_lead_business_type: str = "full time developer"
-    default_lead_field_note: str = "expert in full stack"
+    default_lead_full_name: str = ""
+    default_lead_company_name: str = ""
+    default_lead_job_title: str = ""
+    default_lead_city: str = ""
+    default_lead_business_type: str = ""
+    default_lead_field_note: str = ""
     default_lead_additional_notes: str = ""
     # Soft AI disclosure in opening (keeps compliance; wording still BDE-like).
     disclose_ai_assistant: bool = True
