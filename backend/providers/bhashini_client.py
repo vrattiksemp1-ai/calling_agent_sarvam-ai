@@ -285,6 +285,11 @@ class BhashiniClient:
             trace("bhashini.config.response", task=task, language=language, service_id=resolved[0])
             return resolved
 
+    async def inference_endpoint(self, language: str | None = None) -> tuple[str, str, str]:
+        """(url, auth header name, auth value) for direct pipeline calls."""
+        _, url, auth_name, auth_value = await self._service("asr", language or self.default_language)
+        return url, auth_name, auth_value
+
     @staticmethod
     def _parse_config(
         payload: dict, task: str, language: str, override: str = ""

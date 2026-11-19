@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.api.call_routes import router as call_router
 from backend.api.routes import router
+from backend.api.transcription_routes import router as transcription_router
 from backend.config import Settings, get_settings
 from backend.conversation import ConversationEngine
 from backend.database import create_engine_and_session, make_database_url
@@ -25,6 +26,9 @@ from backend.telephony.call_manager import CallRegistry
 from backend.telephony.exotel_service import ExotelService
 from backend.telephony.turn_flow import TurnFlow
 from backend.telephony.twilio_service import TwilioService
+from backend.transcription.bhashini_diarized import BhashiniDiarizedTranscriber
+from backend.transcription.jobs import TranscriptionService
+from backend.transcription.sarvam_batch import SarvamBatchTranscriber
 from backend.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -72,6 +76,7 @@ def build_app(
                 "llm_client",
                 "twilio_client",
                 "exotel_client",
+                "transcription_service",
             ):
                 client = getattr(app.state, client_name, None)
                 if client is not None and hasattr(client, "aclose"):
@@ -113,6 +118,14 @@ def build_app(
             "bhashini": app.state.bhashini_client,
         },
         default=settings.speech_provider,
+    )
+    # Transcription page: speaker-labelled transcripts of recorded files.
+    app.state.transcription_service = TranscriptionService(
+        settings,
+        {
+            "sarvam": SarvamBatchTranscriber(settings),
+            "bhashini": BhashiniDiarizedTranscriber(settings, app.state.bhashini_client),
+        },
     )
     app.state.llm_client = llm_client or LlmClient(settings)
     app.state.conversation_engine = ConversationEngine(
@@ -204,11 +217,12 @@ def build_app(
 
     app.include_router(router)
     app.include_router(call_router)
+    app.include_router(transcription_router)
 
     @app.middleware("http")
     async def no_cache_static(request: Request, call_next):
         response = await call_next(request)
-        if request.url.path.startswith("/static") or request.url.path == "/":
+        if request.url.path.startswith("/static") or request.url.path in {"/", "/transcribe"}:
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
             response.headers["Pragma"] = "no-cache"
         return response
@@ -219,6 +233,10 @@ def build_app(
         @app.get("/", include_in_schema=False)
         def index() -> HTMLResponse:
             return HTMLResponse(FRONTEND_DIR.joinpath("index.html").read_text(encoding="utf-8"))
+
+        @app.get("/transcribe", include_in_schema=False)
+        def transcribe_page() -> HTMLResponse:
+            return HTMLResponse(FRONTEND_DIR.joinpath("transcribe.html").read_text(encoding="utf-8"))
 
     return app
 

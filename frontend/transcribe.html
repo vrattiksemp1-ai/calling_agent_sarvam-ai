@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Transcription · Sarvam Cloud Lead Agent</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <h1>Sarvam Cloud Lead Agent</h1>
+      <nav class="page-nav" aria-label="Pages">
+        <a href="/">Calling agent</a>
+        <a href="/transcribe" aria-current="page">Transcription</a>
+      </nav>
+    </div>
+    <label class="provider-picker" for="speech-provider">
+      <span class="provider-picker-label">Speech provider</span>
+      <select id="speech-provider" aria-describedby="provider-lock-hint">
+        <option value="sarvam">Sarvam</option>
+        <option value="bhashini">Bhashini</option>
+      </select>
+      <span id="provider-lock-hint" class="provider-lock-hint hidden">Locked while transcribing</span>
+    </label>
+    <div class="badges">
+      <span id="provider-badge" class="badge badge-neutral" role="status">Provider: checking…</span>
+    </div>
+  </header>
+
+  <main class="layout layout-single">
+    <section class="panel" aria-label="Transcribe a recording">
+      <h2 class="panel-title">Transcribe a recording</h2>
+      <p class="muted-text">
+        Upload a call or meeting recording (any audio or video format). Speech in English, Hindi and Gujarati
+        is transcribed, each speaker is labelled (Speaker 1, Speaker 2, …) with timestamps, and the result is
+        saved as a text file.
+      </p>
+
+      <form id="upload-form" class="upload-form" autocomplete="off">
+        <label id="drop-zone" class="drop-zone" for="audio-file">
+          <input id="audio-file" type="file" accept="audio/*,video/*,.mp3,.wav,.m4a,.aac,.ogg,.opus,.flac,.amr,.wma,.webm,.mp4,.mkv,.mov,.3gp" />
+          <span id="drop-text">Choose a file or drop it here</span>
+        </label>
+
+        <div class="upload-options">
+          <label for="num-speakers">Number of speakers
+            <select id="num-speakers">
+              <option value="">Detect automatically</option>
+              <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+              <option value="4">4</option><option value="5">5</option><option value="6">6</option>
+              <option value="7">7</option><option value="8">8</option><option value="10">10</option>
+            </select>
+          </label>
+          <span id="speaker-hint" class="muted-text small">Used by Sarvam only; Bhashini always detects automatically.</span>
+        </div>
+
+        <div id="provider-notice" class="notice"></div>
+
+        <button id="transcribe-btn" class="btn btn-primary" type="submit" disabled>Transcribe</button>
+      </form>
+
+      <div id="error-box" class="error-box hidden" role="alert"></div>
+
+      <div id="progress-box" class="progress-box hidden" aria-live="polite">
+        <div class="progress-head">
+          <span id="progress-message">Uploading…</span>
+          <span id="progress-elapsed" class="muted-text small"></span>
+        </div>
+        <div class="progress-track"><span id="progress-bar"></span></div>
+      </div>
+
+      <div id="result-box" class="result-box hidden">
+        <div class="result-head">
+          <p id="result-summary" class="result-summary"></p>
+          <div class="export-row">
+            <a id="download-btn" class="btn btn-primary" href="#" download>Download .txt</a>
+            <button id="copy-btn" class="btn btn-secondary" type="button">Copy text</button>
+          </div>
+        </div>
+        <pre id="transcript-text" class="transcript-text" tabindex="0" aria-label="Transcript"></pre>
+      </div>
+    </section>
+
+    <section class="panel" aria-label="Recent transcriptions">
+      <h2 class="panel-title">Recent transcriptions</h2>
+      <p class="muted-text small">Text files are saved in <code>storage/transcripts</code>. This list resets when the server restarts.</p>
+      <ul id="recent-list" class="recent-list"><li class="muted-text">None yet.</li></ul>
+    </section>
+  </main>
+
+  <script src="/static/js/transcribe.js" defer></script>
+</body>
+</html>

@@ -155,6 +155,26 @@ class Settings(BaseSettings):
     bhashini_stt_rate_per_hour_inr: float = 0.0
     bhashini_tts_rate_per_10k_chars_inr: float = 0.0
 
+    # --- File transcription with speaker labels (Transcription page) --------
+    transcription_max_mb: int = 1024
+    transcription_dir: str = str(PROJECT_ROOT / "storage" / "transcripts")
+    # Sarvam Batch API: up to 2 h per file, built-in diarization. Tested Nov
+    # 2026 on en/hi/gu audio: saaras:v4 + codemix kept every language in its
+    # own script (v3 / transcribe wrote English and Hindi in Gujarati script).
+    sarvam_batch_url: str = "https://api.sarvam.ai/speech-to-text/job/v1"
+    sarvam_batch_model: str = "saaras:v4"
+    sarvam_batch_mode: str = "codemix"
+    sarvam_batch_poll_seconds: float = 3.0
+    sarvam_batch_timeout_seconds: float = 3600.0
+    # Bhashini diarization fails above ~2 min per request (tested Nov 2026),
+    # so long files are diarized in overlapping windows and speakers are
+    # matched across windows by who talks during the shared overlap.
+    bhashini_diarization_service_id: str = "bhashini/speaker-diarization"
+    bhashini_diarization_window_seconds: float = 120.0
+    bhashini_diarization_overlap_seconds: float = 30.0
+    bhashini_transcription_concurrency: int = 4
+    bhashini_segment_max_seconds: float = 30.0
+
     llm_provider: str = "sarvam"
     llm_base_url: str = "https://api.sarvam.ai"
     llm_api_key: str = ""
