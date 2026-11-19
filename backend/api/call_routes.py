@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from backend.config import Settings
 from backend.pipeline_trace import trace
+from backend.providers.speech_router import SpeechRouter
 from backend.telephony.call_manager import CallRecord, CallRegistry, CallSession
 from backend.telephony.exotel_service import ExotelService
 from backend.telephony.phone import InvalidPhoneNumberError, normalize_e164
@@ -62,6 +63,10 @@ class PlaceCallRequest(BaseModel):
         default=None,
         description="Optional contact personalization for this outbound call.",
     )
+    speech_provider: Literal["sarvam", "bhashini"] | None = Field(
+        default=None,
+        description="STT/TTS provider for this call; omitted uses SPEECH_PROVIDER.",
+    )
 
 
 class CallStatusOut(BaseModel):
@@ -71,6 +76,7 @@ class CallStatusOut(BaseModel):
     from_: str = Field(alias="from")
     session_id: str | None = None
     error: str | None = None
+    speech_provider: str | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -83,6 +89,7 @@ def _status_out(record: CallRecord) -> CallStatusOut:
         from_=record.from_number,
         session_id=record.session_id,
         error=record.error,
+        speech_provider=record.speech_provider,
     )
 
 
@@ -116,6 +123,8 @@ async def place_call(request: Request, body: PlaceCallRequest) -> CallStatusOut:
     service = _call_service(request, provider)
     registry: CallRegistry = request.app.state.call_registry
     turn_flow: TurnFlow = request.app.state.turn_flow
+    speech_router: SpeechRouter = request.app.state.speech_router
+    speech_provider = body.speech_provider or speech_router.default
 
     try:
         to = normalize_e164(body.to)
@@ -154,19 +163,26 @@ async def place_call(request: Request, body: PlaceCallRequest) -> CallStatusOut:
     # A language-only shared greeting cache cannot safely contain a contact
     # name. Build named audio before dialing, then attach it to the resulting
     # CallSid so Twilio receives personalized TwiML immediately on answer.
+    # A non-default speech provider has no warm greeting cache either, so its
+    # opening is also prepared (in that provider's voice) before dialing.
     prepared_greeting: tuple[str, str] | None = None
     if (
         provider == "twilio"
         and service.trial_mode
-        and (profile.lead.full_name or "").strip()
-    ):
-        prepared_greeting = await turn_flow.prepare_call_greeting(
-            settings.default_language
+        and (
+            (profile.lead.full_name or "").strip()
+            or speech_provider != speech_router.default
         )
+    ):
+        with speech_router.use(speech_provider):
+            prepared_greeting = await turn_flow.prepare_call_greeting(
+                settings.default_language
+            )
 
     trace(
         "call.place.start",
         provider=provider,
+        speech_provider=speech_provider,
         to=to,
         trial_mode=settings.twilio_trial_mode,
         lead_overrides=lead_overrides,
@@ -181,11 +197,15 @@ async def place_call(request: Request, body: PlaceCallRequest) -> CallStatusOut:
         provider=provider,
         status=result.status,
         lead_overrides=lead_overrides,
+        speech_provider=speech_provider,
         greeting_twiml=prepared_greeting[0] if prepared_greeting else None,
         greeting_text=prepared_greeting[1] if prepared_greeting else None,
     )
     registry.add(record)
-    logger.info("Call registered: %s", result.call_sid)
+    registry.last_speech_provider = speech_provider
+    logger.info(
+        "Call registered: %s (speech provider: %s)", result.call_sid, speech_provider
+    )
     trace(
         "call.place.ok",
         call_sid=result.call_sid,
@@ -475,7 +495,7 @@ async def call_stream(ws: WebSocket) -> None:
         settings=settings,
         session_factory=ws.app.state.session_factory,
         engine=ws.app.state.conversation_engine,
-        sarvam=ws.app.state.sarvam_client,
+        sarvam=ws.app.state.speech_router,
         twilio=ws.app.state.twilio_client,
         registry=ws.app.state.call_registry,
         transport=transport,
@@ -497,7 +517,7 @@ async def exotel_call_stream(ws: WebSocket) -> None:
         settings=settings,
         session_factory=ws.app.state.session_factory,
         engine=ws.app.state.conversation_engine,
-        sarvam=ws.app.state.sarvam_client,
+        sarvam=ws.app.state.speech_router,
         twilio=None,
         registry=ws.app.state.call_registry,
         transport=transport,

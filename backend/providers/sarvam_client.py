@@ -339,6 +339,13 @@ class SarvamRealtimeTtsSession:
 
 
 class SarvamClient:
+    provider_name = "sarvam"
+    supports_realtime_stt = True
+    supports_realtime_tts = True
+    supports_streaming_tts = True
+    # Saaras auto-detects the language, so no hint is needed.
+    accepts_language_hint = False
+
     def __init__(
         self,
         settings: Settings,

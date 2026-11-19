@@ -27,6 +27,11 @@ from backend.models import Message, Session
 from backend.language_utils import map_stt_language_code
 from backend.pipeline_trace import trace
 from backend.providers.sarvam_client import SarvamClient
+from backend.providers.speech_router import (
+    SpeechRouter,
+    provider_name_of,
+    transcribe_with_hint,
+)
 from backend.streaming_json import StreamingTextChunker
 from backend.telephony import mulaw
 from backend.telephony.endpointing import SemanticEndpointing
@@ -154,6 +159,8 @@ class CallRecord:
     greeting_text: str | None = None
     # Consecutive Twilio Gather empty SpeechResult count (reset on real speech).
     empty_listen_count: int = 0
+    # STT/TTS provider chosen in the UI for this call: "sarvam" | "bhashini".
+    speech_provider: str | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -172,6 +179,9 @@ class CallRegistry:
 
     def __init__(self) -> None:
         self._calls: dict[str, CallRecord] = {}
+        # Provider of the most recently placed call; used when a carrier
+        # stream reports a call id that was not registered by place_call.
+        self.last_speech_provider: str | None = None
 
     def add(self, record: CallRecord) -> None:
         self._calls[record.call_sid] = record
@@ -212,7 +222,7 @@ class CallSession:
         settings: Settings,
         session_factory,
         engine: ConversationEngine,
-        sarvam: SarvamClient,
+        sarvam: SarvamClient | SpeechRouter,
         twilio: TwilioService | None,
         registry: CallRegistry,
         ws: WebSocket | None = None,
@@ -262,6 +272,29 @@ class CallSession:
             settings.sarvam_semantic_slow_silence_ms,
         )
         self._semantic_silence_ms = settings.sarvam_realtime_stt_silence_ms
+        # Bhashini ASR needs the language up front; track the conversation's.
+        self._language_hint: str | None = settings.default_language
+
+    @property
+    def _speech_name(self) -> str:
+        return provider_name_of(self._sarvam)
+
+    def _bind_speech_provider(self) -> None:
+        """Swap the router for the concrete client chosen for this call."""
+        if not isinstance(self._sarvam, SpeechRouter):
+            return
+        record = self._registry.get(self._call_sid) if self._call_sid else None
+        name = (record.speech_provider if record else None) or getattr(
+            self._registry, "last_speech_provider", None
+        )
+        self._sarvam = self._sarvam.get(name)
+        if record is not None and not record.speech_provider:
+            self._registry.update(self._call_sid, speech_provider=self._speech_name)
+        logger.info(
+            "call_speech_provider call_id=%s provider=%s",
+            self._call_sid,
+            self._speech_name,
+        )
 
     # ---------- media streaming ----------
 
@@ -336,7 +369,7 @@ class CallSession:
             timings.retry_count += max(
                 0, getattr(self._sarvam, "last_attempt_count", 1) - 1
             )
-            timings.tts_provider = "sarvam"
+            timings.tts_provider = self._speech_name
             timings.tts_mode = "buffered"
             timings.tts_attempted = True
             timings.tts_latency_ms = tts_ms
@@ -446,7 +479,7 @@ class CallSession:
         timings = TurnTimings(
             settings=self._settings,
             transport=self._transport.name,
-            stt_provider="sarvam",
+            stt_provider=self._speech_name,
         )
         timings.mark("utterance_end")
         if pcm16 is None:
@@ -473,8 +506,8 @@ class CallSession:
             transport=self._transport.name,
         )
         try:
-            transcript, stt_ms, stt_language = await self._sarvam.transcribe(
-                str(tmp), duration_ms
+            transcript, stt_ms, stt_language = await transcribe_with_hint(
+                self._sarvam, str(tmp), duration_ms, self._language_hint
             )
         except AppError as exc:
             logger.warning("Call STT failed: %s", exc.code)
@@ -536,6 +569,7 @@ class CallSession:
                 use_streaming = (
                     self._settings.llm_streaming_enabled
                     and self._settings.sarvam_realtime_tts_enabled
+                    and getattr(self._sarvam, "supports_realtime_tts", True)
                 )
                 trace(
                     "stream.conversation.start",
@@ -572,7 +606,7 @@ class CallSession:
                                 timings.mark("tts_reconnect")
                                 timings.log(logger, event="tts_reconnect")
                             self._tts_connection_count += 1
-                        timings.tts_provider = "sarvam"
+                        timings.tts_provider = self._speech_name
                         timings.tts_mode = "websocket"
                         timings.tts_attempted = True
                         tts_consumer = asyncio.create_task(
@@ -600,6 +634,7 @@ class CallSession:
                 )
                 reply = parsed.assistant_message
                 detected_language = session.language or self._settings.default_language
+                self._language_hint = detected_language
                 timings.response_char_count = len(reply)
 
                 if tts_session is not None:
@@ -620,7 +655,7 @@ class CallSession:
                             0, getattr(self._sarvam, "last_attempt_count", 1) - 1
                         )
                         timings.tts_attempted = True
-                        timings.tts_provider = "sarvam"
+                        timings.tts_provider = self._speech_name
                         if timings.tts_mode != "websocket_to_buffered":
                             timings.tts_mode = "buffered"
                         timings.mark("tts_first_audio")
@@ -927,7 +962,7 @@ class CallSession:
                         frame = event.pcm16[offset : offset + CORE_FRAME_BYTES]
                         if not frame:
                             continue
-                        if self._settings.sarvam_realtime_stt_enabled:
+                        if self._stt_receive_task is not None:
                             if self._stt_audio_queue.full():
                                 self._stt_audio_queue.get_nowait()
                             self._stt_audio_queue.put_nowait(frame)
@@ -982,12 +1017,17 @@ class CallSession:
                         if self._transport.name == "exotel_agent_stream"
                         else "twilio"
                     ),
+                    speech_provider=getattr(
+                        self._registry, "last_speech_provider", None
+                    ),
                 )
             )
+        self._bind_speech_provider()
         self._session_id = await self._create_session()
         if (
             self._settings.sarvam_realtime_stt_enabled
             and self._sarvam is not None
+            and getattr(self._sarvam, "supports_realtime_stt", True)
         ):
             self._stt_receive_task = asyncio.create_task(
                 self._run_realtime_stt(),

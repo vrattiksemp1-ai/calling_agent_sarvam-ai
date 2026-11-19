@@ -11,12 +11,18 @@ from backend.audio import prepare_audio, validate_upload
 from backend.config import Settings, get_settings
 from backend.conversation import ConversationEngine
 from backend.database import session_scope
-from backend.errors import LeadNotFoundError, SessionNotFoundError, TtsError
+from backend.errors import AppError, LeadNotFoundError, SessionNotFoundError, TtsError
 from backend.exports import lead_to_csv_bytes, lead_to_json_bytes
 from backend.metrics import TurnTimings
 from backend.models import LEAD_FIELDS, Lead, Message, Session
 from backend.pipeline_trace import trace
-from backend.providers.sarvam_client import SarvamClient
+from backend.providers.speech_router import (
+    SpeechRouter,
+    UnknownSpeechProviderError,
+    normalize_speech_provider,
+    provider_name_of,
+    transcribe_with_hint,
+)
 from backend.schemas import (
     ConfirmRequest,
     ConfigOut,
@@ -54,6 +60,21 @@ def _error_response(exc: BaseException, debug: bool) -> dict:
             "details": details,
         }
     }
+
+
+def _speech_client(request: Request, speech_provider: str | None):
+    """Concrete STT/TTS client chosen by the UI dropdown (Sarvam by default)."""
+    router: SpeechRouter = request.app.state.speech_router
+    try:
+        name = normalize_speech_provider(speech_provider, router.default)
+    except UnknownSpeechProviderError as exc:
+        raise AppError(
+            code="INVALID_SPEECH_PROVIDER",
+            message=str(exc),
+            retryable=False,
+            status_code=400,
+        )
+    return router.get(name)
 
 
 def _turn_response(
@@ -108,14 +129,29 @@ def config(request: Request) -> ConfigOut:
         tts_model=settings.sarvam_tts_model,
         voice=settings.sarvam_tts_speaker,
         llm_model=settings.llm_model,
+        speech_provider=settings.speech_provider,
+        speech_providers=[
+            {
+                "id": "sarvam",
+                "label": "Sarvam",
+                "configured": bool(settings.sarvam_api_key),
+            },
+            {
+                "id": "bhashini",
+                "label": "Bhashini",
+                "configured": request.app.state.bhashini_client.api_key_set,
+            },
+        ],
     )
 
 
 @router.get("/api/provider/status", response_model=ProviderStatus)
-async def provider_status(request: Request) -> ProviderStatus:
-    sarvam: SarvamClient = request.app.state.sarvam_client
+async def provider_status(
+    request: Request, speech_provider: str | None = None
+) -> ProviderStatus:
+    speech_client = _speech_client(request, speech_provider)
     llm = request.app.state.llm_client
-    speech = await sarvam.health_check()
+    speech = await speech_client.health_check()
     llm_status = await llm.health_check()
     if speech.status == "error" or llm_status.status == "error":
         status = "error"
@@ -124,7 +160,7 @@ async def provider_status(request: Request) -> ProviderStatus:
     else:
         status = "ok"
     return ProviderStatus(
-        provider="sarvam-cloud",
+        provider=provider_name_of(speech_client),
         status=status,
         message="Speech service: {speech}. LLM: {llm}.".format(
             speech=speech.message, llm=llm_status.message
@@ -135,9 +171,9 @@ async def provider_status(request: Request) -> ProviderStatus:
 
 
 @router.post("/api/sessions")
-async def create_session(request: Request):
+async def create_session(request: Request, speech_provider: str | None = None):
     settings: Settings = request.app.state.settings
-    sarvam: SarvamClient = request.app.state.sarvam_client
+    sarvam = _speech_client(request, speech_provider)
     engine: ConversationEngine = request.app.state.conversation_engine
     # Primary path: LLM-generated opening (varies every call). Emergency
     # profile shell is used only if the LLM greeting fails.
@@ -188,6 +224,7 @@ async def create_session(request: Request):
             "audio_base64": audio_base64,
             "audio_mime": audio_mime,
             "warning": warning,
+            "speech_provider": provider_name_of(sarvam),
             "lead": engine.to_lead_out(lead, session).model_dump(),
         }
 
@@ -246,6 +283,7 @@ async def process_audio(
     session_id: str,
     file: UploadFile = File(...),
     retain_audio: bool = False,
+    speech_provider: str | None = None,
 ) -> dict:
     settings: Settings = request.app.state.settings
     with session_scope(request.app.state.session_factory) as db:
@@ -253,9 +291,12 @@ async def process_audio(
         if session is None:
             raise SessionNotFoundError(session_id)
         engine: ConversationEngine = request.app.state.conversation_engine
-        sarvam: SarvamClient = request.app.state.sarvam_client
+        sarvam = _speech_client(request, speech_provider)
+        speech_name = provider_name_of(sarvam)
 
-        timings = TurnTimings(settings=settings)
+        timings = TurnTimings(
+            settings=settings, stt_provider=speech_name, tts_provider=speech_name
+        )
         prepared = None
         try:
             data = await file.read()
@@ -280,8 +321,12 @@ async def process_audio(
                 },
             )
 
-            transcript, stt_latency, stt_language = await sarvam.transcribe(
-                prepared.wav_path, prepared.duration_ms
+            # Bhashini needs the language up front; Sarvam auto-detects.
+            transcript, stt_latency, stt_language = await transcribe_with_hint(
+                sarvam,
+                prepared.wav_path,
+                prepared.duration_ms,
+                session.language or settings.default_language,
             )
             timings.stt_latency_ms = stt_latency
             timings.transcript_char_count = len(transcript)
@@ -369,16 +414,19 @@ async def process_audio(
 
 @router.post("/api/sessions/{session_id}/message")
 async def process_message(
-    request: Request, session_id: str, body: TextMessage
+    request: Request,
+    session_id: str,
+    body: TextMessage,
+    speech_provider: str | None = None,
 ) -> dict:
     settings: Settings = request.app.state.settings
-    sarvam: SarvamClient = request.app.state.sarvam_client
+    sarvam = _speech_client(request, speech_provider)
     with session_scope(request.app.state.session_factory) as db:
         session = db.get(Session, session_id)
         if session is None:
             raise SessionNotFoundError(session_id)
         engine: ConversationEngine = request.app.state.conversation_engine
-        timings = TurnTimings(settings=settings)
+        timings = TurnTimings(settings=settings, tts_provider=provider_name_of(sarvam))
         transcript = body.text.strip()
         timings.transcript_char_count = len(transcript)
         trace(

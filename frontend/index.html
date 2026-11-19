@@ -10,8 +10,16 @@
   <header class="app-header">
     <div class="brand">
       <h1>Sarvam Cloud Lead Agent</h1>
-      <p class="subtitle">Voice lead qualification on the Sarvam AI cloud (STT + TTS)</p>
+      <p id="subtitle" class="subtitle">Voice lead qualification on the Sarvam AI cloud (STT + TTS)</p>
     </div>
+    <label class="provider-picker" for="speech-provider">
+      <span class="provider-picker-label">Speech provider</span>
+      <select id="speech-provider" aria-describedby="provider-lock-hint">
+        <option value="sarvam">Sarvam</option>
+        <option value="bhashini">Bhashini</option>
+      </select>
+      <span id="provider-lock-hint" class="provider-lock-hint hidden">Locked for this conversation — press Reset to change</span>
+    </label>
     <div class="badges">
       <span id="provider-badge" class="badge badge-neutral" role="status">Provider: checking…</span>
       <span id="mic-badge" class="badge badge-neutral" role="status">Microphone: unknown</span>
@@ -71,7 +79,7 @@
       </div>
 
       <div id="notice" class="notice">
-        Speech and language processing run on the Sarvam AI cloud. Per-turn cost is estimated from the configured rates.
+        Speech recognition and voice run on the Sarvam AI cloud. Per-turn cost is estimated from the configured rates.
       </div>
 
       <div id="error-box" class="error-box hidden" role="alert"></div>
@@ -113,7 +121,7 @@
   </section>
 
   <footer class="app-footer">
-    <p>
+    <p id="privacy-note">
       Privacy: recordings are sent to the Sarvam AI cloud for transcription and
       voice synthesis. Cost figures are estimates from configured rates; the
       Sarvam invoice is authoritative.

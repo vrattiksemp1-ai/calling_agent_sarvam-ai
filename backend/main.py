@@ -16,8 +16,10 @@ from backend.config import Settings, get_settings
 from backend.conversation import ConversationEngine
 from backend.database import create_engine_and_session, make_database_url
 from backend.errors import AppError
+from backend.providers.bhashini_client import BhashiniClient
 from backend.providers.llm_client import LlmClient
 from backend.providers.sarvam_client import SarvamClient
+from backend.providers.speech_router import SpeechRouter
 from backend.rate_limit import RateLimiter
 from backend.telephony.call_manager import CallRegistry
 from backend.telephony.exotel_service import ExotelService
@@ -35,6 +37,7 @@ def build_app(
     *,
     session_factory=None,
     sarvam_client: SarvamClient | None = None,
+    bhashini_client: BhashiniClient | None = None,
     llm_client: LlmClient | None = None,
     twilio_client: TwilioService | None = None,
     exotel_client: ExotelService | None = None,
@@ -65,6 +68,7 @@ def build_app(
                 await asyncio.gather(*startup_tasks, return_exceptions=True)
             for client_name in (
                 "sarvam_client",
+                "bhashini_client",
                 "llm_client",
                 "twilio_client",
                 "exotel_client",
@@ -100,6 +104,16 @@ def build_app(
     app.state.settings = settings
     app.state.session_factory = session_factory or factory
     app.state.sarvam_client = sarvam_client or SarvamClient(settings)
+    app.state.bhashini_client = bhashini_client or BhashiniClient(settings)
+    # Speech (STT + TTS) is chosen per conversation/call from the UI dropdown;
+    # the LLM below stays the same for both providers.
+    app.state.speech_router = SpeechRouter(
+        {
+            "sarvam": app.state.sarvam_client,
+            "bhashini": app.state.bhashini_client,
+        },
+        default=settings.speech_provider,
+    )
     app.state.llm_client = llm_client or LlmClient(settings)
     app.state.conversation_engine = ConversationEngine(
         app.state.llm_client,
@@ -124,7 +138,7 @@ def build_app(
         settings=settings,
         session_factory=app.state.session_factory,
         engine=app.state.conversation_engine,
-        sarvam=app.state.sarvam_client,
+        sarvam=app.state.speech_router,
         twilio=app.state.twilio_client,
         registry=app.state.call_registry,
     )

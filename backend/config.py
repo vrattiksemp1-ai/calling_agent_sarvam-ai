@@ -37,6 +37,9 @@ DETECTED_TO_TTS_LANGUAGE = {
 }
 
 
+SPEECH_PROVIDERS = ("sarvam", "bhashini")
+
+
 def tts_language_code_for(detected_language: str | None, default: str) -> str:
     key = (detected_language or "").strip().lower()
     code = DETECTED_TO_TTS_LANGUAGE.get(key, default)
@@ -106,6 +109,51 @@ class Settings(BaseSettings):
     )
     sarvam_realtime_tts_codec: str = "linear16"
     sarvam_request_timeout: float = 120.0
+
+    # Speech provider (STT + TTS) used when a request/call does not pick one.
+    # The UI dropdown chooses per conversation/call: "sarvam" | "bhashini".
+    # The LLM is unaffected - Bhashini has no chat model.
+    speech_provider: str = "sarvam"
+
+    # --- Bhashini (https://dibd-bhashini.gitbook.io/bhashini-apis) ----------
+    # Flow: Pipeline Config call (userID + ulcaApiKey) returns serviceId,
+    # inference endpoint and inference key; Pipeline Compute call does ASR/TTS.
+    # Bhashini documents these APIs as proof-of-concept only; production use
+    # needs a paid agreement with the Bhashini team.
+    bhashini_user_id: str = ""
+    bhashini_ulca_api_key: str = ""
+    bhashini_pipeline_id: str = "64392f96daac500b55c543cd"
+    bhashini_config_url: str = (
+        "https://meity-auth.ulcacontrib.org/ulca/apis/v0/model/getModelsPipeline"
+    )
+    # Optional shortcut: when the inference key AND service IDs are set, the
+    # config call is skipped entirely.
+    bhashini_inference_api_key: str = ""
+    bhashini_inference_url: str = (
+        "https://dhruva-api.bhashini.gov.in/services/inference/pipeline"
+    )
+    # Optional service ID overrides (empty = use what the config call returns),
+    # e.g. bhashini/bodhan/asr-transcribe-flex, Bhashini/IITM/TTS.
+    bhashini_asr_service_id: str = ""
+    bhashini_tts_service_id: str = ""
+    # Bhashini ASR needs a source language (no auto-detect). Empty = use
+    # default_language; the conversation's current language is used per turn.
+    bhashini_default_language: str = ""
+    # Detect the spoken language each turn (runs in parallel with ASR in the
+    # expected language; ASR is redone only when the lead switched language).
+    # Tested Nov 2026: hi/gu detected at ~1.0 confidence, English at only
+    # ~0.6, so a low-confidence result is treated as English.
+    bhashini_language_detection: bool = True
+    bhashini_ald_service_id: str = "bhashini/iitmandi/audio-lang-detection/gpu"
+    bhashini_ald_min_confidence: float = 0.9
+    bhashini_tts_gender: str = "female"
+    bhashini_tts_speed: float = 1.0
+    # 8000 Hz matches the phone line; the browser plays it fine too.
+    bhashini_tts_sample_rate: int = 8000
+    bhashini_request_timeout: float = 60.0
+    # Bhashini publishes no prices (PoC use is free), so cost defaults to 0.
+    bhashini_stt_rate_per_hour_inr: float = 0.0
+    bhashini_tts_rate_per_10k_chars_inr: float = 0.0
 
     llm_provider: str = "sarvam"
     llm_base_url: str = "https://api.sarvam.ai"
@@ -237,6 +285,22 @@ class Settings(BaseSettings):
         if cleaned in {"female", "woman", "f", "w", "feminine"}:
             return "female"
         return ""
+
+    @field_validator("speech_provider")
+    @classmethod
+    def _validate_speech_provider(cls, value: str) -> str:
+        provider = (value or "sarvam").strip().lower()
+        if provider not in SPEECH_PROVIDERS:
+            raise ValueError("SPEECH_PROVIDER must be 'sarvam' or 'bhashini'")
+        return provider
+
+    @field_validator("bhashini_tts_gender", mode="before")
+    @classmethod
+    def _clean_bhashini_gender(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        cleaned = value.split("#", 1)[0].strip().strip("\"'").lower()
+        return "male" if cleaned in {"male", "m", "man"} else "female"
 
     @field_validator("telephony_provider")
     @classmethod

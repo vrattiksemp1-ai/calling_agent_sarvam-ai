@@ -211,12 +211,18 @@ class TurnTimings:
     def estimated_stt_cost(self) -> float:
         if not self.settings:
             return 0.0
-        return estimate_stt_cost(self.audio_duration_ms, self.settings.stt_rate_per_hour_inr)
+        rate = self.settings.stt_rate_per_hour_inr
+        if (self.stt_provider or "").startswith("bhashini"):
+            rate = getattr(self.settings, "bhashini_stt_rate_per_hour_inr", 0.0)
+        return estimate_stt_cost(self.audio_duration_ms, rate)
 
     def estimated_tts_cost(self) -> float:
         if not self.settings or not self.tts_attempted:
             return 0.0
-        return estimate_tts_cost(self.response_char_count, self.settings.tts_rate_per_10k_chars_inr)
+        rate = self.settings.tts_rate_per_10k_chars_inr
+        if (self.tts_provider or "").startswith("bhashini"):
+            rate = getattr(self.settings, "bhashini_tts_rate_per_10k_chars_inr", 0.0)
+        return estimate_tts_cost(self.response_char_count, rate)
 
     def llm_cost(self) -> float:
         if not self.settings or not self.llm_usage:

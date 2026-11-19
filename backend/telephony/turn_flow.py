@@ -40,6 +40,7 @@ from backend.language_utils import (
 )
 from backend.pipeline_trace import trace
 from backend.providers.sarvam_client import SarvamClient
+from backend.providers.speech_router import SpeechRouter, provider_name_of
 from backend.streaming_json import FirstSpeechChunkBuffer
 from backend.telephony.call_manager import (
     CallRecord,
@@ -138,7 +139,7 @@ class TurnFlow:
         settings: Settings,
         session_factory,
         engine: ConversationEngine,
-        sarvam: SarvamClient,
+        sarvam: SarvamClient | SpeechRouter,
         twilio: TwilioService,
         registry: CallRegistry,
     ) -> None:
@@ -155,6 +156,29 @@ class TurnFlow:
         self._greeting_cache: dict[str, tuple[float, str, str]] = {}
         self._greeting_refreshing: set[str] = set()
         self._greeting_lock = asyncio.Lock()
+
+    # ---------- speech provider (Sarvam / Bhashini) ----------
+
+    def _activate_speech(self, call_sid: str | None) -> None:
+        """Select this call's STT/TTS provider for the current task.
+
+        ``self._sarvam`` is a SpeechRouter in the app; work spawned after this
+        (turn jobs, TTS streams) inherits the choice via the task context.
+        """
+        activate = getattr(self._sarvam, "activate", None)
+        if not callable(activate):
+            return
+        record = self._registry.get(call_sid) if call_sid else None
+        activate(record.speech_provider if record else None)
+
+    @property
+    def _speech_name(self) -> str:
+        return provider_name_of(self._sarvam)
+
+    def _greeting_key(self, lang: str) -> str:
+        """Greeting audio is provider-specific, so cache it per provider."""
+        provider = getattr(self._sarvam, "current_name", None)
+        return f"{provider}:{lang}" if isinstance(provider, str) else lang
 
     # ---------- TwiML builders ----------
 
@@ -397,7 +421,7 @@ class TurnFlow:
             timings.retry_count += max(
                 0, getattr(self._sarvam, "last_attempt_count", 1) - 1
             )
-            timings.tts_provider = "sarvam"
+            timings.tts_provider = self._speech_name
             if timings.tts_mode != "streaming_to_buffered":
                 timings.tts_mode = "buffered"
             timings.tts_attempted = True
@@ -425,13 +449,16 @@ class TurnFlow:
         Returns (None, 0) when streaming is disabled or produces no audio in
         time, so callers can fall back to the buffered file path.
         """
-        if not self._settings.sarvam_tts_streaming:
+        if not self._settings.sarvam_tts_streaming or not getattr(
+            self._sarvam, "supports_streaming_tts", True
+        ):
+            # Bhashini has no streaming TTS: host the finished clip instead.
             return await self._host_tts(text, detected_language, timings)
         token = uuid.uuid4().hex
         stream = TtsStream(timings=timings)
         self._tts_streams[token] = stream
         if timings is not None:
-            timings.tts_provider = "sarvam"
+            timings.tts_provider = self._speech_name
             timings.tts_mode = "streaming"
             timings.tts_attempted = True
         task = asyncio.create_task(
@@ -545,7 +572,9 @@ class TurnFlow:
         When ``call_sid`` is provided, the spoken greeting is written into a
         new DB session so the first user turn does not re-introduce the agent.
         """
+        self._activate_speech(call_sid)
         lang = self._settings.default_language
+        key = self._greeting_key(lang)
         record = self._registry.get(call_sid) if call_sid else None
         if record and record.greeting_twiml and record.greeting_text:
             # Named greetings are prepared before dialing and belong only to
@@ -553,13 +582,13 @@ class TurnFlow:
             self._seed_greeting_session(call_sid, record.greeting_text, lang)
             return record.greeting_twiml
 
-        entry = self._greeting_cache.get(lang)
+        entry = self._greeting_cache.get(key)
         if entry is not None:
             asyncio.create_task(self._refresh_greeting(lang))
             _, twiml, text = entry
             self._seed_greeting_session(call_sid, text, lang)
             return twiml
-        if lang in self._greeting_refreshing:
+        if key in self._greeting_refreshing:
             # Cold-start race only: a greeting is being generated, so serve the
             # static fallback instead of blocking the webhook on the LLM.
             logger.warning("Greeting still generating; serving static fallback.")
@@ -571,13 +600,13 @@ class TurnFlow:
             self._seed_greeting_session(call_sid, text, lang)
             return self._gather_twiml(None, say_text, language=lang)
         async with self._greeting_lock:
-            entry = self._greeting_cache.get(lang)
+            entry = self._greeting_cache.get(key)
             if entry is not None:
                 _, twiml, text = entry
                 self._seed_greeting_session(call_sid, text, lang)
                 return twiml
             twiml = await self._build_and_cache_greeting(lang)
-            entry = self._greeting_cache.get(lang)
+            entry = self._greeting_cache.get(key)
             text = entry[2] if entry else fallback_text("greeting", lang, settings=self._settings)
             self._seed_greeting_session(call_sid, text, lang)
             return twiml
@@ -632,14 +661,15 @@ class TurnFlow:
         await self._refresh_greeting(self._settings.default_language)
 
     async def _refresh_greeting(self, lang: str) -> None:
-        if lang in self._greeting_refreshing:
+        key = self._greeting_key(lang)
+        if key in self._greeting_refreshing:
             return
-        self._greeting_refreshing.add(lang)
+        self._greeting_refreshing.add(key)
         try:
             async with self._greeting_lock:
                 await self._build_and_cache_greeting(lang)
         finally:
-            self._greeting_refreshing.discard(lang)
+            self._greeting_refreshing.discard(key)
 
     async def prepare_call_greeting(
         self, language: str | None = None
@@ -681,7 +711,11 @@ class TurnFlow:
 
     async def _build_and_cache_greeting(self, lang: str) -> str:
         content, text = await self._build_greeting(lang)
-        self._greeting_cache[lang] = (time.monotonic(), content, text)
+        self._greeting_cache[self._greeting_key(lang)] = (
+            time.monotonic(),
+            content,
+            text,
+        )
         return content
 
     def _drop_pending(self, call_sid: str) -> None:
@@ -702,6 +736,7 @@ class TurnFlow:
         Slow path: start background work and Redirect to /turn-result so Twilio's
         ~15s webhook budget is never exceeded.
         """
+        self._activate_speech(call_sid)
         text = (speech_result or "").strip()
 
         record = self._registry.get(call_sid)
@@ -975,6 +1010,7 @@ class TurnFlow:
         self, call_sid: str, text: str, pending: PendingTurn | None = None
     ) -> str:
         """Run conversation + TTS and return the next TwiML document."""
+        self._activate_speech(call_sid)
         record = self._registry.get(call_sid)
         if record is None:
             record = CallRecord(call_sid=call_sid, to_number="", from_number="")

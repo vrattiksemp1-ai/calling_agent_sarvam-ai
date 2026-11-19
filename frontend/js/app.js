@@ -35,6 +35,11 @@ const els = {
   hangupBtn: $("hangup-btn"),
   callStatus: $("call-status"),
   callLeadFields: $("call-lead-fields"),
+  speechProvider: $("speech-provider"),
+  providerLockHint: $("provider-lock-hint"),
+  subtitle: $("subtitle"),
+  notice: $("notice"),
+  privacyNote: $("privacy-note"),
 };
 
 const ACTIVE_CALL_STATUSES = new Set(["queued", "initiated", "ringing", "answered", "in-progress"]);
@@ -60,7 +65,107 @@ const state = {
   activeCallSid: null,
   placingCall: false,
   pollTimer: null,
+  // Provider locked to the current browser conversation (null = not locked).
+  sessionProvider: null,
+  providerInfo: {},
 };
+
+/* ---------- speech provider (Sarvam / Bhashini) ---------- */
+
+const PROVIDER_STORAGE_KEY = "speechProvider";
+
+const PROVIDER_TEXT = {
+  sarvam: {
+    label: "Sarvam",
+    subtitle: "Voice lead qualification on the Sarvam AI cloud (STT + TTS)",
+    notice: "Speech recognition and voice run on the Sarvam AI cloud. Per-turn cost is estimated from the configured rates.",
+    privacy: "Privacy: recordings are sent to the Sarvam AI cloud for transcription and voice synthesis. Cost figures are estimates from configured rates; the Sarvam invoice is authoritative.",
+  },
+  bhashini: {
+    label: "Bhashini",
+    subtitle: "Voice lead qualification with Bhashini speech (STT + TTS)",
+    notice: "Speech recognition and voice run on Bhashini (Government of India). Bhashini allows proof-of-concept use only and has no streaming voice, so replies start a little later. Cost shows ₹0 because Bhashini publishes no prices.",
+    privacy: "Privacy: recordings are sent to Bhashini for transcription and voice synthesis. The AI conversation itself still runs on the configured LLM.",
+  },
+};
+
+function selectedProvider() {
+  return (els.speechProvider && els.speechProvider.value) || "sarvam";
+}
+
+// Provider for the current request: the locked one, else the dropdown's.
+function activeProvider() {
+  return state.sessionProvider || selectedProvider();
+}
+
+function withProvider(url, provider) {
+  const sep = url.includes("?") ? "&" : "?";
+  return url + sep + "speech_provider=" + encodeURIComponent(provider || activeProvider());
+}
+
+function providerLabel(provider) {
+  return (PROVIDER_TEXT[provider] || PROVIDER_TEXT.sarvam).label;
+}
+
+function applyProviderText() {
+  const text = PROVIDER_TEXT[activeProvider()] || PROVIDER_TEXT.sarvam;
+  if (els.subtitle) els.subtitle.textContent = text.subtitle;
+  if (els.notice) els.notice.textContent = text.notice;
+  if (els.privacyNote) els.privacyNote.textContent = text.privacy;
+}
+
+function updateProviderLock() {
+  const locked = !!state.sessionProvider || !!state.activeCallSid || state.placingCall;
+  if (els.speechProvider) {
+    els.speechProvider.disabled = locked;
+    if (state.sessionProvider) els.speechProvider.value = state.sessionProvider;
+  }
+  if (els.providerLockHint) {
+    els.providerLockHint.textContent = state.sessionProvider
+      ? "Locked for this conversation — press Reset to change"
+      : "Locked during the call";
+    els.providerLockHint.classList.toggle("hidden", !locked);
+  }
+}
+
+function lockSessionProvider(provider) {
+  state.sessionProvider = provider;
+  updateProviderLock();
+  applyProviderText();
+}
+
+function unlockSessionProvider() {
+  state.sessionProvider = null;
+  updateProviderLock();
+  applyProviderText();
+}
+
+function onProviderChange() {
+  try { localStorage.setItem(PROVIDER_STORAGE_KEY, selectedProvider()); } catch (_) { /* storage optional */ }
+  applyProviderText();
+  clearError();
+  const info = state.providerInfo[selectedProvider()];
+  if (info && info.configured === false) {
+    showError(providerLabel(selectedProvider()) + " keys are not set yet. Add them to .env and restart the server before using it.");
+  }
+  refreshStatus();
+}
+
+function renderProviderOptions(providers, fallbackDefault) {
+  if (!els.speechProvider || !Array.isArray(providers) || !providers.length) return;
+  let saved = null;
+  try { saved = localStorage.getItem(PROVIDER_STORAGE_KEY); } catch (_) { /* storage optional */ }
+  els.speechProvider.innerHTML = "";
+  providers.forEach((p) => {
+    state.providerInfo[p.id] = p;
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = p.label + (p.configured ? "" : " (keys not set)");
+    els.speechProvider.appendChild(opt);
+  });
+  const ids = providers.map((p) => p.id);
+  els.speechProvider.value = ids.includes(saved) ? saved : (ids.includes(fallbackDefault) ? fallbackDefault : ids[0]);
+}
 
 /* ---------- helpers ---------- */
 
@@ -286,7 +391,8 @@ async function sendRecording() {
   clearError();
   setProcessing(true);
   try {
-    const data = await api(`/api/sessions/${state.sessionId}/audio`, { method: "POST", body: form });
+    if (!state.sessionProvider) lockSessionProvider(selectedProvider());
+    const data = await api(withProvider(`/api/sessions/${state.sessionId}/audio`), { method: "POST", body: form });
     handleTurn(data);
   } catch (err) {
     showError(err.message);
@@ -301,9 +407,11 @@ async function startConversation() {
   clearError();
   const ok = await requestMic();
   if (!ok) return;
+  const provider = selectedProvider();
   try {
-    const data = await api("/api/sessions", { method: "POST" });
+    const data = await api(withProvider("/api/sessions", provider), { method: "POST" });
     state.sessionId = data.session_id;
+    lockSessionProvider(data.speech_provider || provider);
     state.totalCost = 0;
     resetTranscript();
     renderLead(data.lead);
@@ -314,7 +422,7 @@ async function startConversation() {
       playAudio(data.audio_base64, data.audio_mime || "audio/wav");
     }
     enableControls(true);
-    setBadge(els.providerBadge, "Provider: configured", "ok");
+    refreshStatus();
     if (state.tapMode) {
       els.talkBtn.textContent = "Tap to talk";
     }
@@ -331,7 +439,8 @@ async function sendText() {
   clearError();
   setProcessing(true);
   try {
-    const data = await api(`/api/sessions/${state.sessionId}/message`, {
+    if (!state.sessionProvider) lockSessionProvider(selectedProvider());
+    const data = await api(withProvider(`/api/sessions/${state.sessionId}/message`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
@@ -404,6 +513,8 @@ async function resetConversation() {
   try {
     const data = await api(`/api/sessions/${state.sessionId}/reset`, { method: "POST" });
     state.totalCost = 0;
+    // A reset restarts the conversation, so the provider may change now.
+    unlockSessionProvider();
     resetTranscript();
     renderLead(data.lead);
     renderCost(0);
@@ -413,13 +524,19 @@ async function resetConversation() {
   }
 }
 
+const STATUS_BADGE = { ok: "ok", degraded: "warn", error: "err" };
+
 async function refreshStatus() {
+  const provider = activeProvider();
+  setBadge(els.providerBadge, providerLabel(provider) + ": checking…", "neutral");
   try {
-    const data = await api("/api/provider/status");
-    setBadge(els.providerBadge, "Provider: " + data.status, data.status);
+    const data = await api(withProvider("/api/provider/status", provider));
+    if (provider !== activeProvider()) return; // dropdown changed meanwhile
+    setBadge(els.providerBadge, providerLabel(provider) + ": " + data.status, STATUS_BADGE[data.status] || "neutral");
+    els.providerBadge.title = data.message || "";
     debugLog(data);
   } catch (_) {
-    setBadge(els.providerBadge, "Provider: unreachable", "err");
+    setBadge(els.providerBadge, providerLabel(provider) + ": unreachable", "err");
   }
 }
 
@@ -427,6 +544,8 @@ async function loadConfig() {
   try {
     const data = await api("/api/config");
     state.debug = data.debug;
+    renderProviderOptions(data.speech_providers, data.speech_provider);
+    applyProviderText();
     if (data.debug) els.debugPanel.classList.remove("hidden");
   } catch (_) { /* config is optional at load */ }
 }
@@ -483,6 +602,7 @@ async function initCallPicker() {
 
 function setCallControls(active) {
   els.callBtn.disabled = !!active || state.placingCall;
+  updateProviderLock();
   if (els.hangupBtn) els.hangupBtn.disabled = !active;
   if (els.callNumber) els.callNumber.disabled = !!active;
   if (els.callNumberCustom) els.callNumberCustom.disabled = !!active;
@@ -537,7 +657,7 @@ async function placeCall() {
   setCallControls(true);
   els.callStatus.textContent = "Placing call…";
   try {
-    const payload = { to: number };
+    const payload = { to: number, speech_provider: activeProvider() };
     const lead = collectLeadOverrides();
     if (lead) payload.lead = lead;
     const data = await api("/api/calls", {
@@ -548,7 +668,7 @@ async function placeCall() {
     state.activeCallSid = data.call_sid;
     state.placingCall = false;
     setCallControls(true);
-    els.callStatus.textContent = "Calling " + number + " — answer your phone and talk to the agent.";
+    els.callStatus.textContent = "Calling " + number + " with " + providerLabel(payload.speech_provider) + " voice — answer your phone and talk to the agent.";
     pollCallStatus(data.call_sid, number);
   } catch (err) {
     endActiveCallUi("");
@@ -603,6 +723,7 @@ els.exportJsonBtn.addEventListener("click", () => exportLead("json"));
 els.exportCsvBtn.addEventListener("click", () => exportLead("csv"));
 els.stopAudioBtn.addEventListener("click", stopAudio);
 els.callBtn.addEventListener("click", placeCall);
+if (els.speechProvider) els.speechProvider.addEventListener("change", onProviderChange);
 if (els.hangupBtn) els.hangupBtn.addEventListener("click", hangUpCall);
 els.callNumber.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); placeCall(); } });
 els.callNumberCustom.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); placeCall(); } });
@@ -636,6 +757,5 @@ document.addEventListener("keyup", (e) => {
   }
 });
 
-loadConfig();
-refreshStatus();
+loadConfig().then(refreshStatus);
 initCallPicker();

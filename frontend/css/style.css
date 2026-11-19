@@ -39,6 +39,19 @@ html, body {
 .brand h1 { margin: 0; font-size: 1.25rem; }
 .subtitle { margin: 2px 0 0; color: var(--muted); font-size: .85rem; }
 
+.provider-picker {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: .8rem; font-weight: 600; color: var(--muted);
+}
+.provider-picker select {
+  padding: 7px 10px; border-radius: 8px; border: 1px solid var(--accent);
+  background: var(--panel-2); color: var(--text); font-size: .9rem; font-weight: 600;
+  cursor: pointer;
+}
+.provider-picker select:disabled { opacity: .6; cursor: not-allowed; border-color: var(--border); }
+.provider-picker select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.provider-lock-hint { font-size: .72rem; font-weight: 500; color: var(--muted); }
+
 .badges { display: flex; gap: 8px; flex-wrap: wrap; }
 .badge, .chip {
   display: inline-block; padding: 4px 10px; border-radius: 999px;

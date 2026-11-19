@@ -90,6 +90,9 @@ class ConfigOut(BaseModel):
     tts_model: str
     voice: str
     llm_model: str
+    # Default speech provider and the options shown in the UI dropdown.
+    speech_provider: str = "sarvam"
+    speech_providers: list[dict[str, Any]] = []
 
 
 class SessionOut(BaseModel):
